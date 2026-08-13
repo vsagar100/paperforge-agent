@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-CURRENT_STATE_SCHEMA = 3
+CURRENT_STATE_SCHEMA = 4
 
 
 def utc_now() -> datetime:
@@ -56,6 +56,18 @@ class EvidenceKind(StrEnum):
     COMPUTED = "computed"
 
 
+class EvidenceCoverageStatus(StrEnum):
+    SUPPORTED = "supported"
+    PARTIAL = "partial"
+    NOT_LOCATED = "not_located"
+
+
+class RequirementLevel(StrEnum):
+    DRAFT_BLOCKING = "draft_blocking"
+    SUBMISSION_BLOCKING = "submission_blocking"
+    RECOMMENDED = "recommended"
+
+
 class EvidenceItem(BaseModel):
     id: str = Field(pattern=r"^EV-[A-Z0-9_-]+$")
     kind: EvidenceKind
@@ -99,6 +111,83 @@ class ReferenceRecord(BaseModel):
         clean = value.strip().lower()
         clean = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", clean)
         return clean.rstrip(".,; ") or None
+
+
+class ClaimRecord(BaseModel):
+    id: str = Field(pattern=r"^CLM-[A-Z0-9]{12}$")
+    evidence_id: str = Field(pattern=r"^EV-[A-Z0-9_-]+$")
+    text: str = Field(min_length=3)
+    kind: EvidenceKind
+    source_path: str | None = None
+    locator: str | None = None
+    numeric_atoms: list[str] = Field(default_factory=list)
+
+
+class ClaimLedger(BaseModel):
+    claims: list[ClaimRecord] = Field(default_factory=list)
+
+
+class EvidenceRequirement(BaseModel):
+    code: str
+    label: str
+    level: RequirementLevel
+    status: EvidenceCoverageStatus
+    explanation: str
+    matched_claim_ids: list[str] = Field(default_factory=list)
+    requested_detail: str | None = None
+
+
+class EvidenceCoverage(BaseModel):
+    paper_type: PaperType
+    requirements: list[EvidenceRequirement] = Field(default_factory=list)
+
+    @property
+    def draft_blockers(self) -> list[EvidenceRequirement]:
+        return [
+            item
+            for item in self.requirements
+            if item.level == RequirementLevel.DRAFT_BLOCKING
+            and item.status != EvidenceCoverageStatus.SUPPORTED
+        ]
+
+
+class PublicationProfile(BaseModel):
+    profile_id: str
+    journal_name: str | None = None
+    article_type: str = "research_article"
+    source_label: str
+    source_urls: list[str] = Field(default_factory=list)
+    checked_on: str
+    target_rules_verified: bool = False
+    word_min: int = Field(ge=0)
+    word_target: int = Field(ge=500)
+    word_max: int | None = Field(default=None, ge=500)
+    abstract_min_words: int = Field(default=150, ge=0)
+    abstract_max_words: int = Field(default=250, ge=50)
+    keyword_min: int = Field(default=4, ge=1)
+    keyword_max: int = Field(default=6, ge=1)
+    reference_min: int = Field(default=20, ge=0)
+    reference_max: int | None = Field(default=None, ge=1)
+    table_max: int | None = Field(default=None, ge=0)
+    figure_max: int | None = Field(default=None, ge=0)
+    number_sections: bool = True
+    section_order: list[str] = Field(default_factory=list)
+    section_min_words: dict[str, int] = Field(default_factory=dict)
+    required_declarations: list[str] = Field(default_factory=list)
+    formatting_rules: list[str] = Field(default_factory=list)
+    review_dimensions: list[str] = Field(default_factory=list)
+    indexing_context: str
+
+
+class DisplayItemPlan(BaseModel):
+    id: str = Field(pattern=r"^(TAB|FIG)-\d{2}$")
+    kind: str = Field(pattern=r"^(table|figure)$")
+    title: str
+    purpose: str
+    section: str
+    claim_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    status: str = Field(default="planned", pattern=r"^(planned|available|author_required)$")
 
 
 class ResearchProfile(BaseModel):
@@ -162,14 +251,33 @@ class LiteratureSynthesis(BaseModel):
 class OutlineSection(BaseModel):
     heading: str
     purpose: str
+    content_requirements: list[str] = Field(default_factory=list)
+    claim_ids: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     reference_ids: list[str] = Field(default_factory=list)
-    target_words: int = Field(default=350, ge=80, le=2500)
+    target_words: int = Field(default=350, ge=1, le=3000)
 
 
 class ManuscriptOutline(BaseModel):
     title: str
     sections: list[OutlineSection] = Field(min_length=5)
+    display_items: list[DisplayItemPlan] = Field(default_factory=list)
+
+
+class DraftSection(BaseModel):
+    heading: str
+    body: str = Field(min_length=3)
+    claim_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    reference_ids: list[str] = Field(default_factory=list)
+
+
+class DraftBatch(BaseModel):
+    sections: list[DraftSection] = Field(min_length=1)
+
+
+class RevisionBatch(BaseModel):
+    sections: list[DraftSection] = Field(min_length=1)
 
 
 class ReviewIssue(BaseModel):

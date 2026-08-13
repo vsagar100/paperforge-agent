@@ -38,7 +38,7 @@ class OpenAlexClient:
     ) -> None:
         self.config = config
         email = os.getenv(config.contact_email_env, "").strip()
-        user_agent = "PaperForge/1.0"
+        user_agent = "PaperForge/2.0"
         if email:
             user_agent += f" (mailto:{email})"
         self.client = httpx.Client(
@@ -146,7 +146,7 @@ class CrossrefClient:
     ) -> None:
         self.config = config
         email = os.getenv(config.contact_email_env, "").strip()
-        user_agent = "PaperForge/1.0"
+        user_agent = "PaperForge/2.0"
         if email:
             user_agent += f" (mailto:{email})"
         self.client = httpx.Client(

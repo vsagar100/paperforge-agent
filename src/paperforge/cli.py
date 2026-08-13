@@ -267,6 +267,9 @@ def validate(project: Path = typer.Argument(..., exists=True, file_okay=False)) 
             plan=store.load_plan(),
             evidence=store.load_evidence(),
             references=store.load_references(),
+            publication_profile=store.load_publication_profile(),
+            claim_ledger=store.load_claim_ledger(),
+            evidence_coverage=store.load_evidence_coverage(),
         )
         issues = validate_manuscript(
             store.read_manuscript(),
@@ -351,6 +354,11 @@ def _print_run_report(store: ProjectStore, report: WorkflowReport) -> None:
         for issue in report.records[-1].issues:
             if issue.disposition == IssueDisposition.INTEGRITY_BLOCKER:
                 console.print(f"  {issue.code}: {issue.description}")
+                console.print(f"    Required: {issue.required_change}")
+        evidence_actions = store.root / "author-actions" / "evidence-required.md"
+        if report.records[-1].stage == "evidence_mapping" and evidence_actions.exists():
+            console.print(f"[yellow]Complete the evidence prompts:[/yellow] {evidence_actions}")
+            console.print("Save answers under inputs/responses.yaml, then rerun paperforge run.")
     for path in report.export.files:
         console.print(f"  {path}")
     for warning in report.export.warnings:

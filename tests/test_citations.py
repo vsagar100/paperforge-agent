@@ -1,5 +1,7 @@
 from paperforge.citations import (
     build_bibtex,
+    invalid_reference_markers,
+    normalize_citation_markers,
     render_numbered_citations,
     unknown_reference_ids,
 )
@@ -50,3 +52,13 @@ def test_unknown_citation_and_bibtex_generation() -> None:
     assert "doi = {10.1000/first}" in bibtex
     assert "volume = {12}" in bibtex
     assert "pages = {101-110}" in bibtex
+
+
+def test_unambiguous_comma_separated_markers_are_canonicalized() -> None:
+    manuscript = "Prior work is synthesized [@REF001, @REF002]."
+    normalized = normalize_citation_markers(manuscript)
+    assert normalized == "Prior work is synthesized [@REF001; @REF002]."
+    assert invalid_reference_markers(normalized) == []
+    rendered, cited = render_numbered_citations(normalized, references())
+    assert "[1, 2]" in rendered
+    assert [item.id for item in cited] == ["REF001", "REF002"]

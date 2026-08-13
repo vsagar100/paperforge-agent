@@ -14,9 +14,12 @@ from pydantic import BaseModel
 
 from paperforge.domain import (
     CURRENT_STATE_SCHEMA,
+    ClaimLedger,
+    EvidenceCoverage,
     EvidenceItem,
     LiteratureSynthesis,
     ManuscriptOutline,
+    PublicationProfile,
     ReferenceRecord,
     ResearchPlan,
     ResearchProfile,
@@ -34,6 +37,7 @@ PROJECT_DIRS = (
     "evidence",
     "literature",
     "planning",
+    "author-actions",
     "manuscript/versions",
     "reviews",
     "audit",
@@ -80,6 +84,18 @@ class ProjectStore:
     @property
     def outline_path(self) -> Path:
         return self.root / "planning" / "outline.json"
+
+    @property
+    def publication_profile_path(self) -> Path:
+        return self.root / "planning" / "publication-profile.json"
+
+    @property
+    def claim_ledger_path(self) -> Path:
+        return self.root / "evidence" / "claim-ledger.json"
+
+    @property
+    def evidence_coverage_path(self) -> Path:
+        return self.root / "evidence" / "coverage.json"
 
     @contextmanager
     def workflow_lock(self, timeout: float = 3.0) -> Iterator[None]:
@@ -128,9 +144,31 @@ class ProjectStore:
         return state
 
     def _migrate_state(self, payload: dict[str, Any]) -> WorkflowState:
-        backup = self.root / "audit" / "state.v2.json"
+        source_schema = int(payload.get("schema_version", 1))
+        backup = self.root / "audit" / f"state.v{source_schema}.json"
         if not backup.exists():
-            self.write_json("audit/state.v2.json", payload)
+            self.write_json(f"audit/state.v{source_schema}.json", payload)
+
+        if source_schema == 3:
+            profile = ResearchProfile.model_validate(payload.get("profile", {}))
+            legacy_manuscript = self.read_manuscript() if self.manuscript_path.exists() else ""
+            if legacy_manuscript.strip():
+                legacy_path = self.root / "manuscript" / "versions" / "legacy-v1.0.0.md"
+                if not legacy_path.exists():
+                    self.write_text(
+                        str(legacy_path.relative_to(self.root)),
+                        legacy_manuscript,
+                    )
+            return WorkflowState(
+                project_id=str(payload.get("project_id") or uuid4()),
+                profile=profile,
+                migration_notes=[
+                    "Migrated from the v1 workflow to the publication-contract workflow.",
+                    "Existing inputs and responses remain authoritative user evidence.",
+                    "The v1 manuscript was preserved and generated stages require a fresh build.",
+                ],
+                created_at=payload.get("created_at") or utc_now(),
+            )
 
         legacy_profile = payload.get("profile", {})
         legacy_details: list[str] = []
@@ -177,7 +215,7 @@ class ProjectStore:
             migration_notes=[
                 "Migrated from the v0.2 state model.",
                 "Existing responses.yaml is treated as authoritative user evidence.",
-                "The legacy manuscript was preserved and the v1 pipeline will create a fresh draft.",
+                "The legacy manuscript was preserved and the v2 pipeline will create a fresh draft.",
             ],
             created_at=payload.get("created_at") or utc_now(),
         )
@@ -276,6 +314,26 @@ class ProjectStore:
 
     def load_outline(self) -> ManuscriptOutline:
         return ManuscriptOutline.model_validate(self.read_json("planning/outline.json"))
+
+    def save_publication_profile(self, value: PublicationProfile) -> None:
+        self.write_json("planning/publication-profile.json", value.model_dump(mode="json"))
+
+    def load_publication_profile(self) -> PublicationProfile:
+        return PublicationProfile.model_validate(
+            self.read_json("planning/publication-profile.json")
+        )
+
+    def save_claim_ledger(self, value: ClaimLedger) -> None:
+        self.write_json("evidence/claim-ledger.json", value.model_dump(mode="json"))
+
+    def load_claim_ledger(self) -> ClaimLedger:
+        return ClaimLedger.model_validate(self.read_json("evidence/claim-ledger.json"))
+
+    def save_evidence_coverage(self, value: EvidenceCoverage) -> None:
+        self.write_json("evidence/coverage.json", value.model_dump(mode="json"))
+
+    def load_evidence_coverage(self) -> EvidenceCoverage:
+        return EvidenceCoverage.model_validate(self.read_json("evidence/coverage.json"))
 
     def read_manuscript(self) -> str:
         if not self.manuscript_path.exists():

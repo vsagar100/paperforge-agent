@@ -1,12 +1,8 @@
 from __future__ import annotations
 
 import json
-import re
 
 from paperforge.providers.base import ModelProvider, ModelRequest, ModelResponse
-
-BEGIN_MARKER = "<!-- PAPERFORGE:BEGIN -->"
-END_MARKER = "<!-- PAPERFORGE:END -->"
 
 
 class MockProvider(ModelProvider):
@@ -126,11 +122,33 @@ class MockProvider(ModelProvider):
                         "The section preserves technical caution, transparent limitations, and "
                         "clear provenance throughout the generated manuscript." + citation
                     )
-                chunks.append(f"## {heading}\n\n{body}")
-            return _text_response("\n\n".join(chunks))
+                chunks.append(
+                    {
+                        "heading": heading,
+                        "body": body,
+                        "claim_ids": section.get("claim_ids") or [],
+                        "evidence_ids": section.get("evidence_ids") or [],
+                        "reference_ids": section.get("reference_ids") or [],
+                    }
+                )
+            return _json_response({"sections": chunks})
         if operation == "revise":
-            manuscript = str(context.get("manuscript") or "")
-            return _text_response(manuscript)
+            sections = context.get("requested_sections") or []
+            return _json_response(
+                {
+                    "sections": [
+                        {
+                            "heading": section.get("heading") or "Section",
+                            "body": section.get("current_body")
+                            or "No supported revision available.",
+                            "claim_ids": section.get("claim_ids") or [],
+                            "evidence_ids": section.get("evidence_ids") or [],
+                            "reference_ids": section.get("reference_ids") or [],
+                        }
+                        for section in sections
+                    ]
+                }
+            )
         return _json_response({"message": "mock response"})
 
     def healthcheck(self) -> tuple[bool, str]:
@@ -152,15 +170,6 @@ def _context(prompt: str) -> dict:
 def _json_response(payload: dict) -> ModelResponse:
     return ModelResponse(
         content=json.dumps(payload),
-        model="deterministic-mock",
-        provider="mock",
-    )
-
-
-def _text_response(content: str) -> ModelResponse:
-    clean = re.sub(r"(?im)^#{1,3}\s+references\s*$.*\Z", "", content).strip()
-    return ModelResponse(
-        content=f"{BEGIN_MARKER}\n{clean}\n{END_MARKER}",
         model="deterministic-mock",
         provider="mock",
     )

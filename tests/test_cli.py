@@ -10,7 +10,7 @@ runner = CliRunner()
 def test_version_init_and_status_commands(tmp_path: Path) -> None:
     version = runner.invoke(app, ["--version"])
     assert version.exit_code == 0
-    assert "PaperForge 1.0.0" in version.stdout
+    assert "PaperForge 2.0.0" in version.stdout
 
     project = tmp_path / "cli-paper"
     initialized = runner.invoke(

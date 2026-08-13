@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -10,9 +11,10 @@ from conftest import (
     UAVRegressionProvider,
 )
 from docx import Document
+from docx.shared import RGBColor
 
 from paperforge.config import load_config
-from paperforge.domain import IssueDisposition, PaperType, ResearchProfile, StageStatus
+from paperforge.domain import PaperType, ResearchProfile, StageStatus
 from paperforge.llm import LLMClient
 from paperforge.stages import StageRunner
 from paperforge.storage import ProjectStore
@@ -36,17 +38,24 @@ def test_topic_only_input_completes_without_questions(
     assert report.records[-1].stage == "export"
     assert state.profile.resolved_paper_type == PaperType.REVIEW_ARTICLE
     assert state.workflow_completed is True
-    assert state.submission_ready is True
+    assert state.submission_ready is False
+    assert state.author_actions
     assert all(state.status_for(stage).complete for stage in engine.config.workflow.stages)
     assert not (project_store.root / "inputs" / "required_facts.yaml").exists()
     assert (project_store.root / "outputs" / "manuscript.md").exists()
     assert (project_store.root / "outputs" / "literature-matrix.csv").exists()
+    assert (project_store.root / "outputs" / "publication-profile.md").exists()
+    assert (project_store.root / "outputs" / "submission-checklist.md").exists()
     document = Document(project_store.root / "outputs" / "manuscript.docx")
-    numbered = [
-        paragraph for paragraph in document.paragraphs if paragraph.style.name == "List Number"
+    references = [
+        paragraph.text
+        for paragraph in document.paragraphs
+        if re.match(r"^\d+\.\s+", paragraph.text)
     ]
-    assert numbered
-    assert all(not paragraph.text.startswith("1. ") for paragraph in numbered)
+    assert references[0].startswith("1. ")
+    assert any(paragraph.text.startswith("1. Introduction") for paragraph in document.paragraphs)
+    assert document.styles["Heading 2"].font.name == "Times New Roman"
+    assert document.styles["Heading 2"].font.color.rgb == RGBColor(0, 0, 0)
     assert literature.calls == 1
 
 
@@ -65,6 +74,8 @@ def test_topic_only_with_model_number_is_not_misclassified(
             "minimum_verified_sources": 3,
             "minimum_cited_sources": 3,
             "minimum_manuscript_words": 300,
+            "minimum_tables_for_original_research": 0,
+            "require_section_depth": False,
         }
     )
     payload["literature"].update({"min_sources": 3, "target_sources": 6, "max_sources": 8})
@@ -109,11 +120,11 @@ def test_rejected_revision_is_preserved_and_retried(project_store: ProjectStore)
     record = project_store.load_state().stage_records["evidence_review"]
     assert record.status == StageStatus.PASSED
     assert provider.calls["revise"] >= 2
-    assert any("Rejected revision attempt 1" in change for change in record.changes)
+    assert any("Rejected 1 unsafe targeted revision" in change for change in record.changes)
     assert "deliberately incomplete revision" not in project_store.read_manuscript()
 
 
-def test_uav_regression_does_not_turn_optional_work_into_blockers(
+def test_incomplete_uav_study_stops_before_drafting_with_specific_evidence_gaps(
     tmp_path: Path,
     default_config_path: Path,
 ) -> None:
@@ -186,23 +197,18 @@ def test_uav_regression_does_not_turn_optional_work_into_blockers(
     engine, _ = engine_for(store, provider)
     report = engine.run()
     state = store.load_state()
-    final = state.stage_records["final_review"]
+    evidence_mapping = state.stage_records["evidence_mapping"]
 
-    assert report.records[-1].stage == "export"
+    assert report.records[-1].stage == "evidence_mapping"
     assert state.profile.resolved_paper_type == PaperType.ORIGINAL_RESEARCH
-    assert final.status == StageStatus.PASSED
-    assert state.submission_ready is True
-    assert not any(
-        issue.disposition == IssueDisposition.INTEGRITY_BLOCKER for issue in final.issues
-    )
-    assert {issue.code for issue in final.issues} <= {
-        "external_baseline_not_in_scope",
-        "regulatory_detail_not_in_scope",
-        "simulation_not_in_scope",
-    }
-    assert "## Related Work" in store.read_manuscript()
-    assert len(store.read_manuscript().split("## Related Work", 1)[1].split()) > 30
-    search_evidence = next(
-        item for item in store.load_evidence() if item.id == "EV-COMPUTED-LITERATURE-SEARCH"
-    )
-    assert "Selected records: 6" in search_evidence.content
+    assert evidence_mapping.status == StageStatus.BLOCKED
+    assert state.submission_ready is False
+    codes = {issue.code for issue in evidence_mapping.issues}
+    assert "insufficient_study_evidence_algorithm_parameters" in codes
+    assert "insufficient_study_evidence_evaluation_independence" in codes
+    assert "insufficient_study_evidence_statistical_support" in codes
+    assert "insufficient_study_evidence_calibration" in codes
+    assert not store.read_manuscript().strip()
+    questions = (store.root / "author-actions" / "evidence-required.md").read_text(encoding="utf-8")
+    assert "temperature threshold" in questions
+    assert "confusion-matrix counts" in questions

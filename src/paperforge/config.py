@@ -13,6 +13,26 @@ from paperforge.domain import PaperType
 
 PIPELINE_STAGES = (
     "prepare",
+    "journal_profile",
+    "evidence_mapping",
+    "plan",
+    "literature",
+    "source_appraisal",
+    "synthesis",
+    "outline",
+    "draft",
+    "evidence_review",
+    "methodology_review",
+    "results_review",
+    "discussion_review",
+    "writing_review",
+    "journal_review",
+    "final_review",
+    "export",
+)
+
+LEGACY_V1_PIPELINE_STAGES = (
+    "prepare",
     "plan",
     "literature",
     "synthesis",
@@ -80,7 +100,7 @@ class WorkflowConfig(BaseModel):
     def validate_stages(cls, value: list[str]) -> list[str]:
         if value != list(PIPELINE_STAGES):
             raise ValueError(
-                "workflow.stages must use the complete ordered PaperForge 1.0 pipeline"
+                "workflow.stages must use the complete ordered PaperForge 2.0 pipeline"
             )
         return value
 
@@ -89,7 +109,7 @@ class PaperConfig(BaseModel):
     requested_type: PaperType = PaperType.AUTO
     topic_only_default: PaperType = PaperType.REVIEW_ARTICLE
     fallback_to_review_without_results: bool = True
-    target_word_count: int = Field(default=4500, ge=1200, le=15000)
+    target_word_count: int = Field(default=5200, ge=1200, le=15000)
 
     @model_validator(mode="after")
     def validate_defaults(self) -> PaperConfig:
@@ -104,9 +124,9 @@ class LiteratureConfig(BaseModel):
     crossref_endpoint: str = "https://api.crossref.org"
     api_key_env: str = "OPENALEX_API_KEY"
     contact_email_env: str = "PAPERFORGE_CONTACT_EMAIL"
-    min_sources: int = Field(default=12, ge=3, le=100)
-    target_sources: int = Field(default=24, ge=3, le=100)
-    max_sources: int = Field(default=30, ge=3, le=150)
+    min_sources: int = Field(default=20, ge=3, le=100)
+    target_sources: int = Field(default=32, ge=3, le=100)
+    max_sources: int = Field(default=40, ge=3, le=150)
     results_per_query: int = Field(default=25, ge=5, le=100)
     verify_dois_with_crossref: bool = True
     require_abstract_fraction: float = Field(default=0.35, ge=0.0, le=1.0)
@@ -128,9 +148,12 @@ class IngestionConfig(BaseModel):
 
 class QualityConfig(BaseModel):
     minimum_review_score: float = Field(default=0.80, ge=0.0, le=1.0)
-    minimum_verified_sources: int = Field(default=12, ge=0, le=100)
-    minimum_cited_sources: int = Field(default=10, ge=0, le=100)
-    minimum_manuscript_words: int = Field(default=2500, ge=300, le=20000)
+    minimum_verified_sources: int = Field(default=20, ge=0, le=100)
+    minimum_cited_sources: int = Field(default=18, ge=0, le=100)
+    minimum_manuscript_words: int = Field(default=3800, ge=300, le=20000)
+    minimum_tables_for_original_research: int = Field(default=1, ge=0, le=20)
+    require_section_depth: bool = True
+    require_complete_declarations_for_submission: bool = True
     maximum_unresolved_integrity_blockers: int = Field(default=0, ge=0)
     require_verified_citations: bool = True
     require_supported_numeric_claims: bool = True
@@ -156,7 +179,7 @@ class JournalConfig(BaseModel):
     def validate_citation_style(cls, value: str) -> str:
         normalized = value.strip().casefold()
         if normalized != "ieee":
-            raise ValueError("PaperForge 1.0 currently supports citation_style: ieee")
+            raise ValueError("PaperForge 2.0 currently supports citation_style: ieee")
         return normalized
 
 
@@ -167,7 +190,7 @@ class ContextConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    schema_version: int = 3
+    schema_version: int = 4
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     models: dict[str, ModelConfig]
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
@@ -189,7 +212,7 @@ class AppConfig(BaseModel):
 def default_config_data() -> dict[str, Any]:
     model = {"model": "gpt-oss:20b", "temperature": 0.1}
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "provider": ProviderConfig().model_dump(mode="json"),
         "models": {
             "planner": {**model, "temperature": 0.1},
@@ -236,17 +259,64 @@ def _migrate_v2(data: dict[str, Any]) -> dict[str, Any]:
     return migrated
 
 
+def _migrate_v3(data: dict[str, Any]) -> dict[str, Any]:
+    defaults = default_config_data()
+    migrated = {**defaults}
+    for section in (
+        "provider",
+        "models",
+        "workflow",
+        "paper",
+        "literature",
+        "ingestion",
+        "quality",
+        "journal",
+        "context",
+    ):
+        incoming = data.get(section, {})
+        if isinstance(incoming, dict):
+            migrated[section] = {**defaults[section], **incoming}
+    if isinstance(data.get("provider", {}).get("ollama"), dict):
+        migrated["provider"]["ollama"] = {
+            **defaults["provider"]["ollama"],
+            **data["provider"]["ollama"],
+        }
+    if migrated["workflow"].get("stages") == list(LEGACY_V1_PIPELINE_STAGES):
+        migrated["workflow"]["stages"] = list(PIPELINE_STAGES)
+    upgrades = {
+        ("paper", "target_word_count"): (4500, 5200),
+        ("literature", "min_sources"): (12, 20),
+        ("literature", "target_sources"): (24, 32),
+        ("literature", "max_sources"): (30, 40),
+        ("quality", "minimum_verified_sources"): (12, 20),
+        ("quality", "minimum_cited_sources"): (10, 18),
+        ("quality", "minimum_manuscript_words"): (2500, 3800),
+    }
+    for (section, key), (legacy_default, new_default) in upgrades.items():
+        if migrated[section].get(key) == legacy_default:
+            migrated[section][key] = new_default
+    migrated["schema_version"] = 4
+    return migrated
+
+
 def load_config(path: Path, *, persist_migration: bool = True) -> AppConfig:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"Configuration must be a YAML mapping: {path}")
-    migrated = int(raw.get("schema_version", 1)) < 3
-    data = _migrate_v2(raw) if migrated else raw
+    source_schema = int(raw.get("schema_version", 1))
+    migrated = source_schema < 4
+    if source_schema < 3:
+        data = _migrate_v2(raw)
+        data["schema_version"] = 4
+    elif source_schema < 4:
+        data = _migrate_v3(raw)
+    else:
+        data = raw
     if host := os.getenv("OLLAMA_HOST"):
         data.setdefault("provider", {}).setdefault("ollama", {})["host"] = host
     config = AppConfig.model_validate(data)
     if migrated and persist_migration:
-        backup = path.with_name("paperforge.v2.yaml")
+        backup = path.with_name(f"paperforge.v{source_schema}.yaml")
         if not backup.exists():
             shutil.copy2(path, backup)
         temporary = path.with_suffix(path.suffix + ".tmp")

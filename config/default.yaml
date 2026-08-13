@@ -1,4 +1,4 @@
-schema_version: 3
+schema_version: 4
 
 provider:
   active: ollama
@@ -32,14 +32,18 @@ models:
 workflow:
   stages:
     - prepare
+    - journal_profile
+    - evidence_mapping
     - plan
     - literature
+    - source_appraisal
     - synthesis
     - outline
     - draft
     - evidence_review
     - methodology_review
     - results_review
+    - discussion_review
     - writing_review
     - journal_review
     - final_review
@@ -54,7 +58,7 @@ paper:
   requested_type: auto
   topic_only_default: review_article
   fallback_to_review_without_results: true
-  target_word_count: 4500
+  target_word_count: 5200
 
 literature:
   enabled: true
@@ -62,9 +66,9 @@ literature:
   crossref_endpoint: https://api.crossref.org
   api_key_env: OPENALEX_API_KEY
   contact_email_env: PAPERFORGE_CONTACT_EMAIL
-  min_sources: 12
-  target_sources: 24
-  max_sources: 30
+  min_sources: 20
+  target_sources: 32
+  max_sources: 40
   results_per_query: 25
   verify_dois_with_crossref: true
   require_abstract_fraction: 0.35
@@ -84,9 +88,12 @@ ingestion:
 
 quality:
   minimum_review_score: 0.80
-  minimum_verified_sources: 12
-  minimum_cited_sources: 10
-  minimum_manuscript_words: 2500
+  minimum_verified_sources: 20
+  minimum_cited_sources: 18
+  minimum_manuscript_words: 3800
+  minimum_tables_for_original_research: 1
+  require_section_depth: true
+  require_complete_declarations_for_submission: true
   maximum_unresolved_integrity_blockers: 0
   require_verified_citations: true
   require_supported_numeric_claims: true

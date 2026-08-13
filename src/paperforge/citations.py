@@ -6,6 +6,24 @@ from paperforge.domain import ReferenceRecord
 
 CITATION_BLOCK = re.compile(r"\[(?P<body>@REF\d{3,}(?:\s*;\s*@REF\d{3,})*)\]")
 CITATION_ID = re.compile(r"@(?P<id>REF\d{3,})")
+LOOSE_CITATION_BLOCK = re.compile(r"\[(?P<body>[^\[\]]*\bREF\d{3,}\b[^\[\]]*)\]")
+PLAIN_REFERENCE_ID = re.compile(r"@?(?P<id>REF\d{3,})")
+
+
+def normalize_citation_markers(manuscript: str) -> str:
+    """Canonicalize unambiguous bracketed REF lists before integrity validation."""
+
+    def replace(match: re.Match[str]) -> str:
+        body = match.group("body").strip()
+        ids = PLAIN_REFERENCE_ID.findall(body)
+        remainder = PLAIN_REFERENCE_ID.sub("", body)
+        remainder = re.sub(r"(?:\s|,|;|&|\band\b)+", "", remainder)
+        if not ids or remainder:
+            return match.group(0)
+        ordered = list(dict.fromkeys(ids))
+        return "[" + "; ".join(f"@{reference_id}" for reference_id in ordered) + "]"
+
+    return LOOSE_CITATION_BLOCK.sub(replace, manuscript)
 
 
 def cited_reference_ids(manuscript: str) -> list[str]:
@@ -33,6 +51,7 @@ def strip_reference_section(manuscript: str) -> str:
 def render_numbered_citations(
     manuscript: str, references: list[ReferenceRecord]
 ) -> tuple[str, list[ReferenceRecord]]:
+    manuscript = normalize_citation_markers(manuscript)
     by_id = {reference.id: reference for reference in references}
     ordered_ids = [
         reference_id for reference_id in cited_reference_ids(manuscript) if reference_id in by_id

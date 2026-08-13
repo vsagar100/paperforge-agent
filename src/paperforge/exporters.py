@@ -7,7 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from paperforge.citations import build_bibtex, render_numbered_citations
-from paperforge.domain import IssueDisposition, WorkflowState
+from paperforge.domain import EvidenceCoverageStatus, IssueDisposition, WorkflowState
+from paperforge.standards import normalize_heading
 from paperforge.storage import ProjectStore
 
 
@@ -25,6 +26,12 @@ class OutputExporter:
         report = ExportReport()
         references = self.store.load_references()
         rendered, cited = render_numbered_citations(self.store.read_manuscript(), references)
+        try:
+            profile = self.store.load_publication_profile()
+        except (FileNotFoundError, ValueError):
+            profile = None
+        if profile and profile.number_sections:
+            rendered = self._number_section_headings(rendered)
         self.store.write_text("outputs/manuscript.md", rendered)
         report.files.append(self.store.root / "outputs" / "manuscript.md")
 
@@ -47,8 +54,21 @@ class OutputExporter:
         self.store.write_text("outputs/revision-history.md", self._revision_history(state))
         report.files.append(self.store.root / "outputs" / "revision-history.md")
 
+        self.store.write_text("outputs/publication-profile.md", self._publication_profile())
+        self.store.write_text("outputs/evidence-coverage.md", self._evidence_coverage())
+        self.store.write_text("outputs/display-item-plan.md", self._display_item_plan())
+        self.store.write_text("outputs/submission-checklist.md", self._submission_checklist(state))
+        report.files.extend(
+            [
+                self.store.root / "outputs" / "publication-profile.md",
+                self.store.root / "outputs" / "evidence-coverage.md",
+                self.store.root / "outputs" / "display-item-plan.md",
+                self.store.root / "outputs" / "submission-checklist.md",
+            ]
+        )
+
         try:
-            docx = self._export_docx(rendered)
+            docx = self._export_docx(rendered, profile)
         except ImportError:
             report.warnings.append(
                 "DOCX export skipped; install PaperForge with the [documents] extra."
@@ -56,6 +76,137 @@ class OutputExporter:
         else:
             report.files.append(docx)
         return report
+
+    def _publication_profile(self) -> str:
+        try:
+            profile = self.store.load_publication_profile()
+        except (FileNotFoundError, ValueError):
+            return "# Publication Profile\n\nNo publication profile is available.\n"
+        lines = [
+            "# Publication Profile",
+            "",
+            f"- Profile: `{profile.profile_id}`",
+            f"- Journal: {profile.journal_name or 'Target journal not specified'}",
+            f"- Source: {profile.source_label}",
+            f"- Target-journal rules verified: {'yes' if profile.target_rules_verified else 'no'}",
+            f"- Article type: `{profile.article_type}`",
+            f"- Main-text range: {profile.word_min}–{profile.word_max or 'not specified'} words",
+            f"- Abstract: {profile.abstract_min_words}–{profile.abstract_max_words} words",
+            f"- Keywords: {profile.keyword_min}–{profile.keyword_max}",
+            f"- References: {profile.reference_min}–{profile.reference_max or 'not specified'}",
+            f"- Tables: maximum {profile.table_max if profile.table_max is not None else 'not specified'}",
+            f"- Figures: maximum {profile.figure_max if profile.figure_max is not None else 'not specified'}",
+            "",
+            "## Indexing context",
+            "",
+            profile.indexing_context,
+            "",
+            "## Rules applied",
+            "",
+            *[f"- {item}" for item in profile.formatting_rules],
+            "",
+            "## Sources",
+            "",
+            *[f"- {item}" for item in profile.source_urls],
+            "",
+        ]
+        return "\n".join(lines)
+
+    def _evidence_coverage(self) -> str:
+        try:
+            coverage = self.store.load_evidence_coverage()
+        except (FileNotFoundError, ValueError):
+            return "# Evidence Coverage\n\nNo evidence coverage report is available.\n"
+        lines = ["# Evidence Coverage", ""]
+        for item in coverage.requirements:
+            lines.extend(
+                [
+                    f"## {item.label}",
+                    "",
+                    f"- Code: `{item.code}`",
+                    f"- Level: `{item.level.value}`",
+                    f"- Status: `{item.status.value}`",
+                    f"- Evidence atoms: {', '.join(item.matched_claim_ids) or 'none located'}",
+                    f"- Assessment: {item.explanation}",
+                    f"- Required detail: {item.requested_detail or 'none'}",
+                    "",
+                ]
+            )
+        return "\n".join(lines)
+
+    def _display_item_plan(self) -> str:
+        try:
+            outline = self.store.load_outline()
+        except (FileNotFoundError, ValueError):
+            return "# Display Item Plan\n\nNo display-item plan is available.\n"
+        lines = [
+            "# Display Item Plan",
+            "",
+            "Only items marked `available` may be generated from registered evidence. "
+            "Items marked `author_required` require an authentic source file or author-approved design.",
+            "",
+        ]
+        if not outline.display_items:
+            lines.append("No table or figure is currently planned.")
+            return "\n".join(lines) + "\n"
+        for item in outline.display_items:
+            lines.extend(
+                [
+                    f"## {item.id}: {item.title}",
+                    "",
+                    f"- Type: `{item.kind}`",
+                    f"- Section: {item.section}",
+                    f"- Status: `{item.status}`",
+                    f"- Purpose: {item.purpose}",
+                    f"- Claim atoms: {', '.join(item.claim_ids) or 'none'}",
+                    f"- Evidence records: {', '.join(item.evidence_ids) or 'none'}",
+                    "",
+                ]
+            )
+        return "\n".join(lines)
+
+    def _submission_checklist(self, state: WorkflowState) -> str:
+        try:
+            profile = self.store.load_publication_profile()
+        except (FileNotFoundError, ValueError):
+            profile = None
+        unresolved = [action for action in state.author_actions if not action.resolved]
+        lines = [
+            "# Submission Checklist",
+            "",
+            f"- Workflow complete: {'yes' if state.workflow_completed else 'no'}",
+            f"- Submission candidate: {'yes' if state.submission_ready else 'no'}",
+            "- Scientific content and all declarations reviewed by every author: pending author confirmation",
+            "- Title page, affiliations, ORCIDs, and corresponding-author details: pending author confirmation",
+            "- Main manuscript anonymized for the journal review model: pending author confirmation",
+            "- Figures checked against original files and resolution requirements: pending author confirmation",
+            "- Tables, equations, units, and cross-references checked: pending author confirmation",
+            "- Reference metadata and DOI links checked against source records: pending author confirmation",
+            "- Similarity/originality check performed by an authorized service: not performed by PaperForge",
+            "",
+            "## Unresolved author actions",
+            "",
+        ]
+        lines.extend(
+            [f"- {item.action} — {item.reason}" for item in unresolved]
+            or ["- None recorded by the implemented gates."]
+        )
+        if profile:
+            lines.extend(
+                [
+                    "",
+                    "## Target-journal submission files",
+                    "",
+                    "- Editable anonymized Word manuscript",
+                    "- Separate title page",
+                    "- Cover letter",
+                    "- Author-approved declarations and permissions",
+                    "- Original figure files and any supplementary/repository materials",
+                    "",
+                    f"Recheck the live journal instructions before submission: {profile.source_urls[0] if profile.source_urls else 'not configured'}",
+                ]
+            )
+        return "\n".join(lines) + "\n"
 
     def _literature_matrix(self) -> str:
         references = self.store.load_references()
@@ -129,7 +280,7 @@ class OutputExporter:
             if issue.get("disposition") == IssueDisposition.INTEGRITY_BLOCKER
         ]
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "project_id": state.project_id,
             "paper_type": state.profile.resolved_paper_type,
             "target_journal": state.profile.target_journal,
@@ -138,9 +289,22 @@ class OutputExporter:
             "readiness_label": (
                 "submission_candidate" if state.submission_ready else "author_action_required"
             ),
-            "word_count": len(re.findall(r"\b[\w'-]+\b", rendered_manuscript)),
+            "word_count": len(
+                re.findall(
+                    r"\b[\w'-]+\b",
+                    re.split(r"(?im)^##\s+(?:\d+\.\s+)?References\s*$", rendered_manuscript)[0],
+                )
+            ),
             "cited_sources": len(cited),
             "verified_cited_sources": sum(reference.verified for reference in cited),
+            "section_word_counts": self._section_word_counts(rendered_manuscript),
+            "table_count": len(
+                re.findall(
+                    r"(?m)^\|(?:[^\n|]+\|)+\s*$\n^\|\s*:?-{3,}",
+                    rendered_manuscript,
+                )
+            ),
+            "evidence_coverage": self._coverage_payload(),
             "integrity_blockers": blockers,
             "unresolved_review_items": unresolved,
             "author_actions": [action.model_dump(mode="json") for action in state.author_actions],
@@ -207,24 +371,37 @@ class OutputExporter:
             lines.append("")
         return "\n".join(lines)
 
-    def _export_docx(self, manuscript: str) -> Path:
+    def _export_docx(self, manuscript: str, profile=None) -> Path:
         try:
             from docx import Document
             from docx.enum.text import WD_ALIGN_PARAGRAPH
-            from docx.shared import Inches, Pt
+            from docx.shared import Cm, Inches, Pt, RGBColor
         except ImportError as exc:
             raise ImportError from exc
 
         document = Document()
         section = document.sections[0]
+        section.page_width = Cm(21)
+        section.page_height = Cm(29.7)
         section.top_margin = Inches(0.8)
         section.bottom_margin = Inches(0.8)
         section.left_margin = Inches(0.9)
         section.right_margin = Inches(0.9)
         styles = document.styles
         styles["Normal"].font.name = "Times New Roman"
-        styles["Normal"].font.size = Pt(11)
+        styles["Normal"].font.size = Pt(
+            12 if profile and profile.profile_id.startswith("djes") else 11
+        )
         styles["Normal"].paragraph_format.line_spacing = 1.15
+        for level, size in {1: 16, 2: 12, 3: 11}.items():
+            style = styles[f"Heading {level}"]
+            style.font.name = "Times New Roman"
+            style.font.size = Pt(size)
+            style.font.bold = True
+            style.font.color.rgb = RGBColor(0, 0, 0)
+            style.paragraph_format.keep_with_next = True
+            style.paragraph_format.space_before = Pt(9 if level > 1 else 12)
+            style.paragraph_format.space_after = Pt(4)
         lines = manuscript.splitlines()
         index = 0
         while index < len(lines):
@@ -266,8 +443,10 @@ class OutputExporter:
                 continue
             numbered = re.match(r"^\d+\.\s+(.+)$", stripped)
             if numbered:
-                paragraph = document.add_paragraph(style="List Number")
-                self._add_markdown_runs(paragraph, numbered.group(1))
+                paragraph = document.add_paragraph()
+                self._add_markdown_runs(paragraph, stripped)
+                paragraph.paragraph_format.left_indent = Inches(0.25)
+                paragraph.paragraph_format.first_line_indent = Inches(-0.25)
                 index += 1
                 continue
             bullet = re.match(r"^[-*]\s+(.+)$", stripped)
@@ -285,6 +464,70 @@ class OutputExporter:
         output = self.store.root / "outputs" / "manuscript.docx"
         document.save(output)
         return output
+
+    def _coverage_payload(self) -> list[dict]:
+        try:
+            coverage = self.store.load_evidence_coverage()
+        except (FileNotFoundError, ValueError):
+            return []
+        return [
+            {
+                "code": item.code,
+                "level": item.level,
+                "status": item.status,
+                "supported": item.status == EvidenceCoverageStatus.SUPPORTED,
+            }
+            for item in coverage.requirements
+        ]
+
+    @staticmethod
+    def _section_word_counts(manuscript: str) -> dict[str, int]:
+        matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", manuscript))
+        counts: dict[str, int] = {}
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(manuscript)
+            body = manuscript[match.end() : end]
+            counts[match.group(1).strip()] = len(re.findall(r"\b[\w'-]+\b", body))
+        return counts
+
+    @staticmethod
+    def _number_section_headings(manuscript: str) -> str:
+        exempt = {
+            "abstract",
+            "keywords",
+            "acknowledgements",
+            "data availability",
+            "conflict of interest",
+            "funding",
+            "author contributions",
+            "declaration of ai use",
+            "references",
+        }
+        main = 0
+        sub = 0
+        active_main: int | None = None
+        output: list[str] = []
+        for line in manuscript.splitlines():
+            h2 = re.match(r"^##\s+(.+?)\s*$", line)
+            if h2:
+                heading = re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", h2.group(1)).strip()
+                if normalize_heading(heading) in exempt:
+                    active_main = None
+                    output.append(f"## {heading}")
+                else:
+                    main += 1
+                    sub = 0
+                    active_main = main
+                    output.append(f"## {main}. {heading}")
+                continue
+            h3 = re.match(r"^###\s+(.+?)\s*$", line)
+            if h3 and active_main is not None:
+                heading = re.sub(r"^\d+(?:\.\d+)*[.)]?\s*", "", h3.group(1)).strip()
+                sub += 1
+                output.append(f"### {active_main}.{sub}. {heading}")
+                continue
+            output.append(line)
+        return "\n".join(output).rstrip() + "\n"
 
     @staticmethod
     def _add_markdown_runs(paragraph, value: str) -> None:

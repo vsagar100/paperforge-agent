@@ -1,14 +1,23 @@
 from paperforge.domain import (
+    DraftBatch,
+    DraftSection,
     EvidenceItem,
     EvidenceKind,
     IssueDisposition,
+    OutlineSection,
     PaperType,
     ReferenceRecord,
     ResearchPlan,
     ReviewIssue,
     Severity,
 )
-from paperforge.validators import IssuePolicy, ValidationContext, validate_revision
+from paperforge.validators import (
+    IssuePolicy,
+    ValidationContext,
+    validate_draft_batch,
+    validate_manuscript,
+    validate_revision,
+)
 
 
 def context(project_config) -> ValidationContext:
@@ -175,3 +184,81 @@ def test_unverified_citation_remains_integrity_blocker(project_config) -> None:
     )
     citation_issue = next(item for item in issues if item.code == "unverified_citation")
     assert citation_issue.disposition == IssueDisposition.INTEGRITY_BLOCKER
+
+
+def test_ref_suffixes_are_never_misread_as_numeric_claims(project_config) -> None:
+    validation_context = context(project_config)
+    validation_context.references.append(
+        ReferenceRecord(
+            id="REF002",
+            title="Second verified source",
+            authors=["B. Author"],
+            year=2023,
+            doi="10.1000/test2",
+            verified=True,
+            verification_sources=["crossref"],
+        )
+    )
+    manuscript = (
+        "# Study\n\n## Related Work\n\nA source-backed statement uses a comma-separated "
+        "marker [@REF001, @REF002]."
+    )
+    issues = validate_manuscript(
+        manuscript,
+        validation_context,
+        review_type="evidence_review",
+    )
+    numeric_descriptions = [
+        item.description for item in issues if item.code == "unsupported_numeric_claim"
+    ]
+    assert numeric_descriptions == []
+
+
+def test_duplicate_sections_and_internal_boundaries_are_integrity_blockers(project_config) -> None:
+    validation_context = context(project_config)
+    manuscript = (
+        "# Study\n\n## Related Work\n\nA substantive first version with enough contextual "
+        "words to be recognized as content.\n\n## Related Work\n\nA duplicate version.\n\n"
+        "<!-- PAPERFORGE:BEGIN -->"
+    )
+    issues = validate_manuscript(manuscript, validation_context, review_type="final_review")
+    by_code = {item.code: item for item in issues}
+    assert by_code["duplicate_section"].disposition == IssueDisposition.INTEGRITY_BLOCKER
+    assert by_code["unresolved_placeholder"].disposition == IssueDisposition.INTEGRITY_BLOCKER
+
+
+def test_fabricated_submission_declaration_is_blocked(project_config) -> None:
+    validation_context = context(project_config)
+    manuscript = (
+        "# Study\n\n## Funding\n\nThis work was funded by the National Research Foundation "
+        "under a competitive grant."
+    )
+    issues = validate_manuscript(manuscript, validation_context, review_type="final_review")
+    declaration = next(item for item in issues if item.code == "unsupported_declaration")
+    assert declaration.section == "Funding"
+    assert declaration.disposition == IssueDisposition.INTEGRITY_BLOCKER
+
+
+def test_structured_draft_rejects_embedded_extra_section(project_config) -> None:
+    validation_context = context(project_config)
+    requested = [
+        OutlineSection(
+            heading="Introduction",
+            purpose="Introduce the study.",
+            evidence_ids=["EV-UAV"],
+            reference_ids=["REF001"],
+            target_words=80,
+        )
+    ]
+    batch = DraftBatch(
+        sections=[
+            DraftSection(
+                heading="Introduction",
+                body="Supported introductory prose.\n\n## Methodology\n\nAn injected extra section.",
+                evidence_ids=["EV-UAV"],
+                reference_ids=["REF001"],
+            )
+        ]
+    )
+    issues = validate_draft_batch(batch, requested, validation_context)
+    assert "unexpected_section" in {item.code for item in issues}

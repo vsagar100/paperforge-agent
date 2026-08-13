@@ -7,9 +7,9 @@ from pydantic import ValidationError
 from paperforge.config import PIPELINE_STAGES, JournalConfig, load_config
 
 
-def test_default_configuration_has_complete_v1_pipeline(default_config_path: Path) -> None:
+def test_default_configuration_has_complete_v2_pipeline(default_config_path: Path) -> None:
     config = load_config(default_config_path, persist_migration=False)
-    assert config.schema_version == 3
+    assert config.schema_version == 4
     assert config.workflow.stages == list(PIPELINE_STAGES)
     assert set(config.models) == {
         "planner",
@@ -48,7 +48,7 @@ def test_v2_configuration_is_backed_up_and_migrated(tmp_path: Path) -> None:
     )
     config = load_config(path)
     assert (tmp_path / "paperforge.v2.yaml").exists()
-    assert yaml.safe_load(path.read_text(encoding="utf-8"))["schema_version"] == 3
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["schema_version"] == 4
     assert config.models["planner"].model == "draft-model"
     assert config.models["reviser"].model == "revise-model"
     assert config.models["reviewer"].model == "review-model"

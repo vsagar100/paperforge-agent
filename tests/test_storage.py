@@ -46,7 +46,7 @@ def test_v2_state_migration_preserves_legacy_manuscript_and_responses(
         },
     )
     state = store.load_state()
-    assert state.schema_version == 3
+    assert state.schema_version == 4
     assert state.project_id == "legacy-project"
     assert state.stage_status == {}
     assert (store.root / "audit" / "state.v2.json").exists()

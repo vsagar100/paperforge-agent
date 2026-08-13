@@ -31,6 +31,8 @@ def project_store(tmp_path: Path, default_config_path: Path) -> ProjectStore:
     payload["quality"]["minimum_verified_sources"] = 3
     payload["quality"]["minimum_cited_sources"] = 3
     payload["quality"]["minimum_manuscript_words"] = 300
+    payload["quality"]["minimum_tables_for_original_research"] = 0
+    payload["quality"]["require_section_depth"] = False
     payload["literature"]["min_sources"] = 3
     payload["literature"]["target_sources"] = 6
     payload["literature"]["max_sources"] = 8
@@ -197,11 +199,11 @@ class ScriptedProvider(ModelProvider):
                 }
             )
         if operation == "draft":
-            return _text(_draft_sections(context))
+            return _json({"sections": _draft_sections(context)})
         if operation == "review":
             return self._review_response(request, context)
         if operation == "revise":
-            return _text(_revision(context))
+            return _json({"sections": _revision(context)})
         raise AssertionError(f"Unexpected model operation: {operation}")
 
     def _review_response(self, request: ModelRequest, context: dict) -> ModelResponse:
@@ -289,10 +291,20 @@ class GuardRetryProvider(ScriptedProvider):
             and request.metadata.get("revision_attempt") == 1
         ):
             self.calls[operation] += 1
-            return _text(
-                "This deliberately incomplete revision contains enough words to cross the response "
-                "parser boundary, but it truncates the manuscript and must never replace the "
-                "preserved version."
+            requested = _context(request.prompt)["requested_sections"]
+            return _json(
+                {
+                    "sections": [
+                        {
+                            "heading": item["heading"],
+                            "body": "This unsafe replacement is deliberately incomplete.",
+                            "claim_ids": [],
+                            "evidence_ids": [],
+                            "reference_ids": [],
+                        }
+                        for item in requested
+                    ]
+                }
             )
         return super().generate(request)
 
@@ -342,8 +354,14 @@ def _text(content: str) -> ModelResponse:
     )
 
 
-def _draft_sections(context: dict) -> str:
-    references = context["allowed_reference_ids"]
+def _draft_sections(context: dict) -> list[dict]:
+    references = list(
+        dict.fromkeys(
+            reference
+            for section in context["requested_sections"]
+            for reference in section.get("reference_ids", [])
+        )
+    )
     citation = (
         "[" + "; ".join(f"@{reference}" for reference in references) + "]" if references else ""
     )
@@ -363,7 +381,15 @@ def _draft_sections(context: dict) -> str:
                 "details are unavailable. Results are presented only within the documented evidence "
                 "boundary. The resulting manuscript provides a reproducible structure, transparent "
                 "limitations, and a technically defensible basis for subsequent author and journal "
-                "review without manufacturing experimental claims or bibliographic records."
+                "review without manufacturing experimental claims or bibliographic records. It "
+                "also makes the scope, provenance, and unresolved author responsibilities visible "
+                "before submission. This separation supports careful peer assessment and prevents "
+                "missing protocol details from being disguised as completed scientific work. The "
+                "workflow further records the literature boundary, checks every citation identifier, "
+                "and rejects unsupported numerical content before assembly. Section-level review then "
+                "examines reproducibility, result interpretation, discussion quality, journal rules, "
+                "and final consistency while preserving unaffected prose. The outcome is explicitly "
+                "classified as a candidate or as requiring author action."
             )
         elif normalized == "review methodology":
             body = (
@@ -421,19 +447,35 @@ def _draft_sections(context: dict) -> str:
                 "contribution remains aligned with the available methods, results, and deployment "
                 f"conditions {citation}."
             )
-        sections.append(f"## {heading}\n\n{body}")
-    return "\n\n".join(sections)
-
-
-def _revision(context: dict) -> str:
-    manuscript = context["manuscript"]
-    if "## Limitations" in manuscript:
-        manuscript = manuscript.replace(
-            "## Limitations\n",
-            "## Limitations\n\n"
-            "Calibration and formal uncertainty procedures were not available in the supplied "
-            "evidence. External baseline, simulation, and regulatory evaluations remain outside the "
-            "reported study scope and are not presented as completed work.\n\n",
-            1,
+        sections.append(
+            {
+                "heading": heading,
+                "body": body,
+                "claim_ids": section.get("claim_ids", []),
+                "evidence_ids": section.get("evidence_ids", []),
+                "reference_ids": section.get("reference_ids", []),
+            }
         )
-    return manuscript
+    return sections
+
+
+def _revision(context: dict) -> list[dict]:
+    revised: list[dict] = []
+    for section in context["requested_sections"]:
+        body = section["current_body"]
+        if section["heading"].casefold() == "limitations":
+            body += (
+                "\n\nCalibration and formal uncertainty procedures were not available in the "
+                "supplied evidence. External baseline, simulation, and regulatory evaluations "
+                "remain outside the reported study scope and are not presented as completed work."
+            )
+        revised.append(
+            {
+                "heading": section["heading"],
+                "body": body,
+                "claim_ids": section.get("claim_ids", []),
+                "evidence_ids": section.get("evidence_ids", []),
+                "reference_ids": section.get("reference_ids", []),
+            }
+        )
+    return revised
