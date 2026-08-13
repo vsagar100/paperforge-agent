@@ -2,25 +2,27 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 from uuid import uuid4
 
-import yaml
 from filelock import FileLock
+from pydantic import BaseModel
 
 from paperforge.domain import (
     CURRENT_STATE_SCHEMA,
-    Claim,
     EvidenceItem,
+    LiteratureSynthesis,
+    ManuscriptOutline,
+    ReferenceRecord,
+    ResearchPlan,
     ResearchProfile,
+    StageRecord,
     StageStatus,
     WorkflowState,
-    normalize_question_key,
     utc_now,
 )
 
@@ -30,15 +32,20 @@ PROJECT_DIRS = (
     "data",
     "figures",
     "evidence",
-    "claims",
+    "literature",
+    "planning",
     "manuscript/versions",
     "reviews",
     "audit",
     "outputs",
 )
 
+T = TypeVar("T", bound=BaseModel)
+
 
 class ProjectStore:
+    """Owns durable project state and all atomic filesystem transitions."""
+
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
 
@@ -55,13 +62,29 @@ class ProjectStore:
         return self.root / "manuscript" / "current.md"
 
     @property
-    def response_template_path(self) -> Path:
-        return self.root / "inputs" / "responses.yaml"
+    def evidence_path(self) -> Path:
+        return self.root / "evidence" / "registry.json"
+
+    @property
+    def references_path(self) -> Path:
+        return self.root / "literature" / "references.json"
+
+    @property
+    def plan_path(self) -> Path:
+        return self.root / "planning" / "research-plan.json"
+
+    @property
+    def synthesis_path(self) -> Path:
+        return self.root / "literature" / "synthesis.json"
+
+    @property
+    def outline_path(self) -> Path:
+        return self.root / "planning" / "outline.json"
 
     @contextmanager
-    def workflow_lock(self, timeout: float = 2.0) -> Iterator[None]:
-        lock = FileLock(str(self.root / "audit" / "workflow.lock"), timeout=timeout)
-        with lock:
+    def workflow_lock(self, timeout: float = 3.0) -> Iterator[None]:
+        (self.root / "audit").mkdir(parents=True, exist_ok=True)
+        with FileLock(str(self.root / "audit" / "workflow.lock"), timeout=timeout):
             yield
 
     def initialize(self, profile: ResearchProfile, default_config: Path) -> WorkflowState:
@@ -72,158 +95,239 @@ class ProjectStore:
         shutil.copyfile(default_config, self.config_path)
         state = WorkflowState(project_id=str(uuid4()), profile=profile)
         self.save_state(state)
-        self.write_json("evidence/registry.json", [])
-        self.write_json("claims/registry.json", [])
+        self.save_evidence([])
+        self.save_references([])
         self.write_text("manuscript/current.md", "")
         self.write_text(
             "inputs/research_brief.md",
-            "# Research brief\n\n"
-            f"Topic: {profile.topic}\n\n"
-            f"Domain: {profile.domain}\n\n"
-            "Add any known objectives, setup, dataset, results, constraints, and target journal here. "
-            "PaperForge will also inspect files placed in sources/, data/, and figures/.\n",
+            "# Research input\n\n"
+            f"## Topic\n\n{profile.topic}\n\n"
+            + (
+                f"## Synopsis\n\n{profile.synopsis.strip()}\n\n"
+                if profile.synopsis and profile.synopsis.strip()
+                else ""
+            ),
         )
-        self.write_response_template(state)
         return state
 
     def load_state(self) -> WorkflowState:
         payload = self.read_json("audit/state.json")
-        migrated, changed = self._migrate_state_payload(payload)
-        state = WorkflowState.model_validate(migrated)
+        if int(payload.get("schema_version", 1)) < CURRENT_STATE_SCHEMA:
+            state = self._migrate_state(payload)
+            self.save_state(state)
+            return state
+        state = WorkflowState.model_validate(payload)
+        repaired = False
         for stage, status in list(state.stage_status.items()):
-            if status == StageStatus.NEEDS_INPUT and not state.open_questions(stage):
+            if status == StageStatus.RUNNING:
                 state.stage_status[stage] = StageStatus.PENDING
-                changed = True
-        if changed:
+                repaired = True
+        if repaired:
+            state.current_stage = None
             self.save_state(state)
         return state
+
+    def _migrate_state(self, payload: dict[str, Any]) -> WorkflowState:
+        backup = self.root / "audit" / "state.v2.json"
+        if not backup.exists():
+            self.write_json("audit/state.v2.json", payload)
+
+        legacy_profile = payload.get("profile", {})
+        legacy_details: list[str] = []
+        objectives = legacy_profile.get("objectives") or []
+        if objectives:
+            legacy_details.extend(
+                ["## Legacy objectives", "", *[f"- {item}" for item in objectives]]
+            )
+        if contribution := legacy_profile.get("contribution"):
+            legacy_details.extend(["", "## Legacy contribution", "", str(contribution)])
+        if constraints := legacy_profile.get("constraints"):
+            legacy_details.extend(
+                [
+                    "",
+                    "## Legacy constraints",
+                    "",
+                    json.dumps(constraints, indent=2, ensure_ascii=False),
+                ]
+            )
+        if legacy_details:
+            legacy_input = self.root / "inputs" / "legacy-profile.md"
+            if not legacy_input.exists():
+                self.write_text(
+                    "inputs/legacy-profile.md", "\n".join(legacy_details).strip() + "\n"
+                )
+        profile = ResearchProfile(
+            topic=str(legacy_profile.get("topic") or "Untitled research project"),
+            synopsis=legacy_profile.get("synopsis"),
+            domain=str(legacy_profile.get("domain") or "engineering"),
+            target_journal=legacy_profile.get("target_journal"),
+            constraints=dict(legacy_profile.get("constraints") or {}),
+        )
+        legacy_manuscript = self.read_manuscript() if self.manuscript_path.exists() else ""
+        if legacy_manuscript.strip():
+            legacy_path = self.root / "manuscript" / "versions" / "legacy-v0.2.1.md"
+            if not legacy_path.exists():
+                self.write_text(
+                    str(legacy_path.relative_to(self.root)),
+                    legacy_manuscript,
+                )
+        return WorkflowState(
+            project_id=str(payload.get("project_id") or uuid4()),
+            profile=profile,
+            migration_notes=[
+                "Migrated from the v0.2 state model.",
+                "Existing responses.yaml is treated as authoritative user evidence.",
+                "The legacy manuscript was preserved and the v1 pipeline will create a fresh draft.",
+            ],
+            created_at=payload.get("created_at") or utc_now(),
+        )
 
     def save_state(self, state: WorkflowState) -> None:
         state.schema_version = CURRENT_STATE_SCHEMA
         state.updated_at = utc_now()
         self.write_json("audit/state.json", state.model_dump(mode="json"))
 
+    def record_stage(self, state: WorkflowState, record: StageRecord) -> None:
+        state.stage_status[record.stage] = record.status
+        state.stage_records[record.stage] = record
+        state.run_history.append(record)
+        state.current_stage = None
+        self.save_state(state)
+        attempt = sum(item.stage == record.stage for item in state.run_history)
+        self.write_json(
+            f"reviews/{record.stage}-{attempt:03d}.json",
+            record.model_dump(mode="json"),
+        )
+
+    def reset_generated_state(self, state: WorkflowState, reason: str) -> None:
+        if self.manuscript_path.exists() and self.read_manuscript().strip():
+            self.save_manuscript(self.read_manuscript(), "pre-invalidation", state)
+        state.stage_status.clear()
+        state.stage_records.clear()
+        state.current_stage = None
+        state.workflow_completed = False
+        state.submission_ready = False
+        state.completed_at = None
+        state.author_actions.clear()
+        state.migration_notes.append(reason)
+        self.write_text("manuscript/current.md", "")
+        self.save_state(state)
+
     def load_evidence(self) -> list[EvidenceItem]:
-        return [
-            EvidenceItem.model_validate(item) for item in self.read_json("evidence/registry.json")
-        ]
+        if not self.evidence_path.exists():
+            return []
+        payload = self.read_json("evidence/registry.json")
+        legacy_kinds = {
+            "user_statement": "user_fact",
+            "experimental": "experimental_data",
+            "source": "source_document",
+            "standard": "source_document",
+            "computed": "computed",
+            "figure": "figure",
+        }
+        migrated = False
+        normalized: list[dict[str, Any]] = []
+        for raw_item in payload:
+            item = dict(raw_item)
+            kind = str(item.get("kind") or "")
+            if kind in legacy_kinds and legacy_kinds[kind] != kind:
+                item["kind"] = legacy_kinds[kind]
+                item.setdefault("metadata", {})["migrated_from_v2_kind"] = kind
+                migrated = True
+            normalized.append(item)
+        items = [EvidenceItem.model_validate(item) for item in normalized]
+        if migrated:
+            backup = self.root / "evidence" / "registry.v2.json"
+            if not backup.exists():
+                self.write_json("evidence/registry.v2.json", payload)
+            self.save_evidence(items)
+        return items
 
     def save_evidence(self, items: list[EvidenceItem]) -> None:
         self.write_json("evidence/registry.json", [item.model_dump(mode="json") for item in items])
 
-    def load_claims(self) -> list[Claim]:
-        return [Claim.model_validate(item) for item in self.read_json("claims/registry.json")]
+    def load_references(self) -> list[ReferenceRecord]:
+        if not self.references_path.exists():
+            return []
+        return [
+            ReferenceRecord.model_validate(item)
+            for item in self.read_json("literature/references.json")
+        ]
 
-    def save_claims(self, items: list[Claim]) -> None:
-        self.write_json("claims/registry.json", [item.model_dump(mode="json") for item in items])
+    def save_references(self, items: list[ReferenceRecord]) -> None:
+        self.write_json(
+            "literature/references.json", [item.model_dump(mode="json") for item in items]
+        )
+
+    def save_plan(self, value: ResearchPlan) -> None:
+        self.write_json("planning/research-plan.json", value.model_dump(mode="json"))
+
+    def load_plan(self) -> ResearchPlan:
+        return ResearchPlan.model_validate(self.read_json("planning/research-plan.json"))
+
+    def save_synthesis(self, value: LiteratureSynthesis) -> None:
+        self.write_json("literature/synthesis.json", value.model_dump(mode="json"))
+
+    def load_synthesis(self) -> LiteratureSynthesis:
+        return LiteratureSynthesis.model_validate(self.read_json("literature/synthesis.json"))
+
+    def save_outline(self, value: ManuscriptOutline) -> None:
+        self.write_json("planning/outline.json", value.model_dump(mode="json"))
+
+    def load_outline(self) -> ManuscriptOutline:
+        return ManuscriptOutline.model_validate(self.read_json("planning/outline.json"))
 
     def read_manuscript(self) -> str:
+        if not self.manuscript_path.exists():
+            return ""
         return self.manuscript_path.read_text(encoding="utf-8")
 
-    def save_manuscript_version(self, text: str, stage: str, state: WorkflowState) -> Path:
+    def save_manuscript(self, text: str, stage: str, state: WorkflowState) -> Path:
+        clean = text.strip() + "\n"
         state.manuscript_version += 1
-        version = (
-            self.root / "manuscript" / "versions" / (f"v{state.manuscript_version:03d}-{stage}.md")
+        safe_stage = "".join(
+            character if character.isalnum() or character == "-" else "-" for character in stage
         )
-        self.write_text(str(version.relative_to(self.root)), text)
-        self.write_text("manuscript/current.md", text)
+        relative = f"manuscript/versions/v{state.manuscript_version:03d}-{safe_stage}.md"
+        self.write_text(relative, clean)
+        self.write_text("manuscript/current.md", clean)
         self.save_state(state)
-        return version
+        return self.root / relative
 
-    def write_stage_review(self, stage: str, run_number: int, payload: dict[str, Any]) -> Path:
-        path = self.root / "reviews" / f"{stage}-{run_number:03d}.json"
-        self.write_json(str(path.relative_to(self.root)), payload)
-        return path
+    def input_fingerprint(self, state: WorkflowState) -> str:
+        digest = hashlib.sha256()
+        profile = state.profile.model_dump(mode="json")
+        profile.pop("resolved_paper_type", None)
+        digest.update(json.dumps(profile, sort_keys=True).encode("utf-8"))
+        for path in self.input_files():
+            relative = path.relative_to(self.root).as_posix()
+            digest.update(relative.encode("utf-8"))
+            digest.update(self.checksum(path).encode("ascii"))
+        return digest.hexdigest()
 
-    def write_response_template(self, state: WorkflowState) -> Path:
-        existing_payload: dict[str, Any] = {}
-        existing_answers: dict[str, str] = {}
-        if self.response_template_path.exists():
-            existing_payload = self._read_response_payload(self.response_template_path)
-            existing_answers = self._normalize_response_answers(existing_payload)
+    def config_fingerprint(self) -> str:
+        return self.checksum(self.config_path)
 
-        # responses.yaml is user-owned input once it has been generated. Merge state into
-        # the file instead of recreating it, so a run can never erase an answer that was
-        # typed but has not yet been committed to the state ledger.
-        answers = dict(existing_answers)
-        for question in state.pending_questions:
-            if not (question.is_open or question.answer):
+    def input_files(self) -> list[Path]:
+        paths: list[Path] = []
+        for folder in ("inputs", "sources", "data", "figures"):
+            root = self.root / folder
+            if not root.exists():
                 continue
-            persisted_answer = (question.answer or "").strip()
-            answers[question.id] = persisted_answer or existing_answers.get(question.id, "")
-
-        instruction = (
-            "Fill each answer once, save this file, then run: paperforge run <project>. "
-            "Answers are imported automatically; paperforge answer-all remains available."
-        )
-        content = {
-            **{
-                key: value
-                for key, value in existing_payload.items()
-                if key not in {"instructions", "answers"}
-            },
-            "instructions": instruction,
-            "answers": answers,
-        }
-        if existing_payload.get("instructions") == instruction and existing_answers == answers:
-            return self.response_template_path
-
-        self.response_template_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.response_template_path.with_suffix(".yaml.tmp")
-        temporary.write_text(
-            yaml.safe_dump(content, sort_keys=False, allow_unicode=True), encoding="utf-8"
-        )
-        temporary.replace(self.response_template_path)
-        return self.response_template_path
-
-    def read_response_answers(self, path: Path | None = None) -> dict[str, str]:
-        """Read a response file without mutating it or accepting nested values."""
-        response_path = (path or self.response_template_path).resolve()
-        payload = self._read_response_payload(response_path)
-        return self._normalize_response_answers(payload)
-
-    @staticmethod
-    def _read_response_payload(path: Path) -> dict[str, Any]:
-        try:
-            payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError as exc:
-            raise ValueError(
-                f"Response file is invalid YAML and was left unchanged: {path}: {exc}"
-            ) from exc
-        if not isinstance(payload, dict):
-            raise ValueError(f"Response file must contain a YAML mapping: {path}")
-        return payload
-
-    @staticmethod
-    def _normalize_response_answers(payload: dict[str, Any]) -> dict[str, str]:
-        raw_answers = payload.get("answers", payload)
-        if not isinstance(raw_answers, dict):
-            raise ValueError("Response YAML must contain an 'answers' mapping.")
-
-        answers: dict[str, str] = {}
-        for identifier, value in raw_answers.items():
-            clean_identifier = str(identifier).strip()
-            if not clean_identifier:
-                raise ValueError("Response YAML contains an empty question identifier.")
-            if value is None:
-                answers[clean_identifier] = ""
-            elif isinstance(value, (str, int, float, bool)):
-                answers[clean_identifier] = str(value).strip()
-            else:
-                raise ValueError(
-                    f"Answer for {clean_identifier} must be a scalar value, not a nested object."
-                )
-        return answers
+            paths.extend(
+                path
+                for path in root.rglob("*")
+                if path.is_file()
+                and not any(part.startswith(".") for part in path.relative_to(root).parts)
+            )
+        return sorted(set(paths), key=lambda item: item.as_posix().casefold())
 
     def read_json(self, relative_path: str) -> Any:
         return json.loads((self.root / relative_path).read_text(encoding="utf-8"))
 
     def write_json(self, relative_path: str, value: Any) -> None:
-        path = self.root / relative_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(path)
+        text = json.dumps(value, indent=2, ensure_ascii=False)
+        self.write_text(relative_path, text + "\n")
 
     def write_text(self, relative_path: str, value: str) -> None:
         path = self.root / relative_path
@@ -240,62 +344,6 @@ class ProjectStore:
                 digest.update(chunk)
         return digest.hexdigest()
 
-    def config_dict(self) -> dict[str, Any]:
-        return yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
-
     @staticmethod
-    def _migrate_state_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-        if int(payload.get("schema_version", 1)) >= CURRENT_STATE_SCHEMA:
-            return payload, False
-
-        migrated = dict(payload)
-        questions = [dict(item) for item in migrated.get("pending_questions", [])]
-        created_at = migrated.get("created_at") or utc_now().isoformat()
-        updated_at = migrated.get("updated_at") or created_at
-        migrated.setdefault("created_at", created_at)
-        migrated.setdefault("updated_at", updated_at)
-        used_numbers: set[int] = set()
-        for index, question in enumerate(questions, start=1):
-            raw_id = str(question.get("id", index))
-            match = re.search(r"\d+", raw_id)
-            number = int(match.group()) if match else index
-            while number in used_numbers:
-                number += 1
-            used_numbers.add(number)
-            question["id"] = f"Q-{number:03d}"
-            question.setdefault("key", normalize_question_key(str(question.get("text", ""))))
-            question.setdefault("stage", "intake")
-            question["status"] = "answered" if question.get("answer") else "open"
-            question.setdefault("created_at", created_at)
-        migrated["pending_questions"] = questions
-
-        max_question_number = max(
-            (int(question["id"].split("-")[1]) for question in questions), default=0
-        )
-        migrated["next_question_number"] = max_question_number + 1
-        open_questions = [question for question in questions if not question.get("answer")]
-        answered_keys = [question["key"] for question in questions if question.get("answer")]
-        migrated["closed_question_keys"] = answered_keys
-
-        if questions and not migrated.get("question_rounds"):
-            migrated["question_rounds"] = [
-                {
-                    "stage": "intake",
-                    "number": 1,
-                    "question_ids": [question["id"] for question in questions],
-                    "created_at": created_at,
-                    "closed_at": updated_at if not open_questions else None,
-                }
-            ]
-        migrated["intake_closed"] = bool(questions) and not open_questions
-        migrated.setdefault("source_fingerprint", None)
-        migrated.setdefault("workflow_completed", False)
-        migrated.setdefault("submission_ready", False)
-        migrated.setdefault("completed_at", None)
-
-        stage_status = dict(migrated.get("stage_status", {}))
-        if migrated["intake_closed"] and stage_status.get("intake") == StageStatus.NEEDS_INPUT:
-            stage_status["intake"] = StageStatus.PENDING
-        migrated["stage_status"] = stage_status
-        migrated["schema_version"] = CURRENT_STATE_SCHEMA
-        return migrated, True
+    def text_fingerprint(value: str) -> str:
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()

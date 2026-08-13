@@ -1,73 +1,109 @@
-schema_version: 2
+schema_version: 3
+
 provider:
   active: ollama
-  timeout_seconds: 180
+  timeout_seconds: 300
   max_retries: 3
-  max_schema_retries: 1
+  max_schema_retries: 2
   ollama:
     host: https://ollama.com
     api_key_env: OLLAMA_API_KEY
     structured_outputs: false
+    think: false
+    keep_alive: null
+
 models:
-  drafting:
-    model: gpt-oss:20b
-    temperature: 0.2
-  enhancement:
-    model: gpt-oss:20b
-    temperature: 0.15
-  scientific_review:
+  planner:
     model: gpt-oss:20b
     temperature: 0.1
-  final_audit:
+  drafter:
+    model: gpt-oss:20b
+    temperature: 0.2
+  reviewer:
     model: gpt-oss:20b
     temperature: 0.0
+  reviser:
+    model: gpt-oss:20b
+    temperature: 0.1
+  final_auditor:
+    model: gpt-oss:20b
+    temperature: 0.0
+
 workflow:
-  max_enhancement_cycles: 3
-  auto_apply_severity: low
-  require_human_for_scientific_change: true
-  continue_on_quality_failure: true
   stages:
-    - intake
-    - evidence_preparation
+    - prepare
+    - plan
+    - literature
+    - synthesis
     - outline
-    - initial_draft
+    - draft
+    - evidence_review
     - methodology_review
-    - engineering_integrity
-    - citation_audit
-    - section_enhancement
-    - abstract_review
-    - originality_review
-    - manuscript_consistency
-    - journal_compliance
-    - final_audit
-quality:
-  minimum_stage_score: 0.85
-  maximum_unresolved_high: 0
-  require_evidence_for_numeric_claims: true
-  require_verified_citations: true
-interaction:
-  mode: minimal
-  question_stage: intake
-  max_question_rounds: 1
-  max_questions_per_round: 5
-  max_total_questions: 5
-  allow_later_stage_questions: false
-  reopen_answered_questions: false
-  group_related_questions: true
-ingestion:
+    - results_review
+    - writing_review
+    - journal_review
+    - final_review
+    - export
+  max_review_cycles: 2
+  sections_per_draft_call: 3
+  resume: true
+  invalidate_on_input_change: true
+  preserve_legacy_manuscript: true
+
+paper:
+  requested_type: auto
+  topic_only_default: review_article
+  fallback_to_review_without_results: true
+  target_word_count: 4500
+
+literature:
   enabled: true
+  endpoint: https://api.openalex.org
+  crossref_endpoint: https://api.crossref.org
+  api_key_env: OPENALEX_API_KEY
+  contact_email_env: PAPERFORGE_CONTACT_EMAIL
+  min_sources: 12
+  target_sources: 24
+  max_sources: 30
+  results_per_query: 25
+  verify_dois_with_crossref: true
+  require_abstract_fraction: 0.35
+  include_types:
+    - article
+    - review
+
+ingestion:
   folders:
     - inputs
     - sources
     - data
     - figures
   max_file_bytes: 25000000
-  max_chars_per_document: 30000
-context:
-  max_total_evidence_chars: 100000
-  max_chars_per_evidence: 12000
-  max_manuscript_chars: 120000
+  max_chars_per_document: 60000
+  max_total_chars: 240000
+
+quality:
+  minimum_review_score: 0.80
+  minimum_verified_sources: 12
+  minimum_cited_sources: 10
+  minimum_manuscript_words: 2500
+  maximum_unresolved_integrity_blockers: 0
+  require_verified_citations: true
+  require_supported_numeric_claims: true
+
 journal:
+  name: null
+  manuscript_type: research_article
   abstract_max_words: 250
   citation_style: ieee
-  manuscript_type: research_article
+  required_sections: []
+  required_declarations:
+    - Data Availability
+    - Conflict of Interest
+    - Funding
+    - Author Contributions
+
+context:
+  max_evidence_chars: 120000
+  max_reference_abstract_chars: 45000
+  max_manuscript_chars: 160000

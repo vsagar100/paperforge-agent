@@ -16,7 +16,7 @@ RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
 class OllamaProvider(ModelProvider):
-    """Native Ollama REST adapter for direct Cloud and intentionally local hosts."""
+    """Ollama adapter with explicit Cloud/local behavior and bounded retries."""
 
     def __init__(self, config: AppConfig, transport: httpx.BaseTransport | None = None) -> None:
         self.config = config
@@ -27,7 +27,7 @@ class OllamaProvider(ModelProvider):
             if not api_key:
                 raise ProviderError(
                     f"{self.settings.api_key_env} is required for Ollama Cloud. "
-                    "Add it to .env in the PaperForge application directory."
+                    "Add only the key value to the application's .env file."
                 )
             headers["Authorization"] = f"Bearer {api_key}"
         self.client = httpx.Client(
@@ -42,11 +42,15 @@ class OllamaProvider(ModelProvider):
         return (urlparse(self.settings.host).hostname or "").casefold() == "ollama.com"
 
     def generate(self, request: ModelRequest) -> ModelResponse:
+        if request.role not in self.config.models:
+            raise ProviderError(f"No model is configured for role '{request.role}'.")
         role_config = self.config.models[request.role]
         prompt = request.prompt
         if request.response_schema:
-            prompt += "\n\nReturn JSON only, matching this schema:\n" + json.dumps(
-                request.response_schema, separators=(",", ":")
+            prompt += (
+                "\n\nReturn exactly one JSON object. It must validate against this JSON Schema. "
+                "Do not use Markdown fences or add commentary:\n"
+                + json.dumps(request.response_schema, separators=(",", ":"))
             )
         payload: dict[str, Any] = {
             "model": role_config.model,
@@ -55,9 +59,19 @@ class OllamaProvider(ModelProvider):
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
-            "options": {"temperature": request.temperature},
+            "options": {
+                "temperature": (
+                    role_config.temperature if request.temperature is None else request.temperature
+                )
+            },
         }
-        if self.settings.structured_outputs and request.response_schema:
+        if self.settings.think is not None:
+            payload["think"] = self.settings.think
+        if self.settings.keep_alive is not None:
+            payload["keep_alive"] = self.settings.keep_alive
+        # Ollama documents JSON-schema format for local servers. Direct Cloud currently
+        # does not support structured outputs, so Cloud is grounded through the prompt.
+        if self.settings.structured_outputs and request.response_schema and not self.is_cloud:
             payload["format"] = request.response_schema
 
         last_error: ProviderError | None = None
@@ -71,13 +85,10 @@ class OllamaProvider(ModelProvider):
                 if response.is_success:
                     return self._model_response(response, role_config.model)
                 last_error = self._http_error(response, role_config.model)
-
             if not last_error.retryable or attempt >= self.config.provider.max_retries:
                 break
             time.sleep(self._retry_delay(attempt, response))
-        if last_error is None:
-            last_error = ProviderError("Ollama request failed without a response")
-        raise last_error
+        raise last_error or ProviderError("Ollama request failed without a response")
 
     def healthcheck(self) -> tuple[bool, str]:
         try:
@@ -85,13 +96,15 @@ class OllamaProvider(ModelProvider):
         except httpx.RequestError as exc:
             return False, f"Ollama connection failed: {exc}"
         if not response.is_success:
-            error = self._http_error(response, "model discovery")
-            return False, str(error)
+            return False, str(self._http_error(response, "model discovery"))
         location = "Ollama Cloud" if self.is_cloud else self.settings.host
         return True, f"{location} is reachable"
 
     def available_models(self) -> list[str]:
-        response = self.client.get("/api/tags")
+        try:
+            response = self.client.get("/api/tags")
+        except httpx.RequestError as exc:
+            raise ProviderError(f"Ollama model discovery failed: {exc}", retryable=True) from exc
         if not response.is_success:
             raise self._http_error(response, "model discovery")
         try:
@@ -109,9 +122,11 @@ class OllamaProvider(ModelProvider):
             content = body["message"]["content"]
         except (ValueError, KeyError, TypeError) as exc:
             raise ProviderError("Ollama returned a successful but invalid chat response") from exc
+        if not isinstance(content, str) or not content.strip():
+            raise ProviderError("Ollama returned an empty model response")
         return ModelResponse(
             content=content,
-            model=body.get("model", fallback_model),
+            model=str(body.get("model") or fallback_model),
             provider="ollama",
             prompt_tokens=body.get("prompt_eval_count"),
             completion_tokens=body.get("eval_count"),
@@ -127,7 +142,7 @@ class OllamaProvider(ModelProvider):
         elif status == 403:
             message = (
                 f"Ollama denied access to '{model}' (403 Forbidden): {detail}. "
-                "Choose a model included in the account plan or upgrade the plan."
+                "Choose a model included in the account plan."
             )
         elif status == 404:
             message = f"Ollama model or endpoint was not found for '{model}': {detail}"

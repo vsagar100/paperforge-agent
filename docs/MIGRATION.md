@@ -1,62 +1,93 @@
-# Upgrade from PaperForge 0.1.0 or 0.2.0 to 0.2.1
+# Migrating from PaperForge 0.2.1 to 1.0
 
-## 1. Back up the existing project
+Version 1.0 replaces the old question/patch workflow with a new state model and complete
+plan-literature-draft-review-revise pipeline.
 
-```powershell
-Copy-Item projects\uav-fire-paper projects\uav-fire-paper-backup -Recurse
-```
+## 1. Back up the working directory
 
-Keep the existing `.env` outside the archive replacement process.
+The migration is designed to be non-destructive, but preserve an external copy of the project before
+changing application versions.
 
-## 2. Replace the application code
-
-Extract the complete 0.2.1 archive into a new application directory. Copy `.env` into that directory,
-or recreate it with only `OLLAMA_API_KEY=<key>`.
-
-Do not copy a new `paperforge.yaml` over the one inside an existing research project. Its journal and
-model choices are project-specific.
-
-## 3. Reinstall
+## 2. Update the repository and environment
 
 ```powershell
+git pull
 .venv\Scripts\Activate.ps1
-pip install -e ".[dev,documents]"
+python -m pip install -e ".[documents]"
 paperforge --version
 ```
 
-Expected version: `PaperForge 0.2.1`.
+Expected:
 
-## 4. Verify provider configuration
-
-```powershell
-paperforge doctor projects\uav-fire-paper
+```text
+PaperForge 1.0.0
 ```
 
-An Ollama model appearing in the list does not prove that the current plan can run it. A 403 response
-now reports subscription or entitlement information directly and is not retried.
-
-## 5. Trigger automatic state migration
+## 3. Rebuild generated stages
 
 ```powershell
-paperforge status projects\uav-fire-paper
+paperforge run projects\uav-fire-paper --rebuild
 ```
 
-Loading status upgrades schema-1 state safely. Existing answers remain in `audit/state.json`. The old
-deadlock—`intake: needs_input` with no open question—is repaired automatically.
+Do not run `paperforge init` for an existing project.
 
-## 6. Resume
+## Automatic preservation
+
+On first access, PaperForge preserves:
+
+| Previous artifact | Preserved copy |
+| --- | --- |
+| `paperforge.yaml` | `paperforge.v2.yaml` |
+| `audit/state.json` | `audit/state.v2.json` |
+| `manuscript/current.md` | `manuscript/versions/legacy-v0.2.1.md` |
+| `inputs/responses.yaml` | Original file remains unchanged |
+
+The new `paperforge.yaml` keeps the Ollama host, key environment name, legacy model choices mapped to
+the new logical roles, and journal settings. New settings receive v1 defaults.
+
+## Model-role mapping
+
+| v0.2 role | v1 role |
+| --- | --- |
+| `drafting` | `planner` and `drafter` |
+| `enhancement` | `reviser` |
+| `scientific_review` | `reviewer` |
+| `final_audit` | `final_auditor` |
+
+## Saved responses
+
+No `answer` or `answer-all` command is required in v1. All non-empty values in the existing
+`inputs/responses.yaml` file are extracted during `prepare` and registered as verified user facts.
+
+For the UAV project, the five responses covering hardware, dataset, results, validation, and
+deployment constraints are sufficient for the policy to select `original_research`.
+
+## Changed behavior
+
+- There is no model-generated question round.
+- A topic without original evidence becomes a review article.
+- Literature discovery and verified citation management are built into the workflow.
+- Drafting occurs section-by-section.
+- Review stages must revise and recheck the manuscript.
+- A model score cannot fail the paper by itself.
+- Missing simulation, regulation, or external baselines are not blockers unless explicitly in scope.
+- Existing inputs trigger a rebuild only when their fingerprint changes.
+
+## Recovery
+
+If a run stops because of provider or network access:
 
 ```powershell
+paperforge doctor projects\uav-fire-paper --inference
 paperforge run projects\uav-fire-paper
 ```
 
-If up to five questions are still open, complete and save the generated response file once, then
-rerun normally:
+Completed stages resume without another model call.
+
+If the intended inputs changed substantially:
 
 ```powershell
-paperforge run projects\uav-fire-paper
+paperforge run projects\uav-fire-paper --rebuild
 ```
 
-PaperForge 0.2.1 automatically imports the file, never erases a non-empty response, and will not
-generate a second intake batch. `paperforge answer-all projects\uav-fire-paper` is retained as an
-optional explicit import command.
+This preserves user files and prior manuscript versions while regenerating downstream artifacts.
