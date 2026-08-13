@@ -1,0 +1,73 @@
+schema_version: 2
+provider:
+  active: ollama
+  timeout_seconds: 180
+  max_retries: 3
+  max_schema_retries: 1
+  ollama:
+    host: https://ollama.com
+    api_key_env: OLLAMA_API_KEY
+    structured_outputs: false
+models:
+  drafting:
+    model: gpt-oss:20b
+    temperature: 0.2
+  enhancement:
+    model: gpt-oss:20b
+    temperature: 0.15
+  scientific_review:
+    model: gpt-oss:20b
+    temperature: 0.1
+  final_audit:
+    model: gpt-oss:20b
+    temperature: 0.0
+workflow:
+  max_enhancement_cycles: 3
+  auto_apply_severity: low
+  require_human_for_scientific_change: true
+  continue_on_quality_failure: true
+  stages:
+    - intake
+    - evidence_preparation
+    - outline
+    - initial_draft
+    - methodology_review
+    - engineering_integrity
+    - citation_audit
+    - section_enhancement
+    - abstract_review
+    - originality_review
+    - manuscript_consistency
+    - journal_compliance
+    - final_audit
+quality:
+  minimum_stage_score: 0.85
+  maximum_unresolved_high: 0
+  require_evidence_for_numeric_claims: true
+  require_verified_citations: true
+interaction:
+  mode: minimal
+  question_stage: intake
+  max_question_rounds: 1
+  max_questions_per_round: 5
+  max_total_questions: 5
+  allow_later_stage_questions: false
+  reopen_answered_questions: false
+  group_related_questions: true
+ingestion:
+  enabled: true
+  folders:
+    - inputs
+    - sources
+    - data
+    - figures
+  max_file_bytes: 25000000
+  max_chars_per_document: 30000
+context:
+  max_total_evidence_chars: 100000
+  max_chars_per_evidence: 12000
+  max_manuscript_chars: 120000
+journal:
+  abstract_max_words: 250
+  citation_style: ieee
+  manuscript_type: research_article

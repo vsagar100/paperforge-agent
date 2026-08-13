@@ -1,0 +1,10 @@
+services:
+  paperforge:
+    build: .
+    environment:
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:?Set OLLAMA_API_KEY}
+      OLLAMA_HOST: ${OLLAMA_HOST:-https://ollama.com}
+    volumes:
+      - ./projects:/projects
+    working_dir: /projects
+    command: ["--help"]
