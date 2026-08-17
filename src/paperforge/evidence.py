@@ -30,6 +30,9 @@ def build_claim_ledger(evidence: list[EvidenceItem]) -> ClaimLedger:
     for item in evidence:
         if item.kind not in allowed_kinds:
             continue
+        if item.metadata.get("calculator") == "literature_search_manifest":
+            # Search counts describe PaperForge's discovery run, not the reported experiment.
+            continue
         for text in _claim_units(item.content):
             clean = " ".join(text.split()).strip(" -")
             if len(clean) < 8 or clean.casefold().startswith("author-supplied factual responses"):
@@ -56,6 +59,8 @@ def build_claim_ledger(evidence: list[EvidenceItem]) -> ClaimLedger:
 def assess_evidence_coverage(
     paper_type: PaperType,
     ledger: ClaimLedger,
+    *,
+    topic: str = "",
 ) -> EvidenceCoverage:
     if paper_type == PaperType.REVIEW_ARTICLE:
         return EvidenceCoverage(
@@ -73,8 +78,55 @@ def assess_evidence_coverage(
         )
 
     all_text = " ".join(claim.text for claim in ledger.claims).casefold()
-    thermal_threshold_measurement = "thermal" in all_text and bool(
-        re.search(r"temperature\s+threshold|thermal\s+threshold", all_text)
+    study_context = f"{topic} {all_text}".casefold()
+    thermal_study = bool(re.search(r"\b(thermal|infrared|lwir|temperature)\b", study_context))
+    uav_study = bool(re.search(r"\b(uav|drone|unmanned aerial|flight)\b", study_context))
+    fire_study = bool(re.search(r"\b(fire|flame|wildfire|burn)\b", study_context))
+    thermal_threshold_measurement = thermal_study and bool(
+        re.search(r"temperature\s+threshold|thermal\s+threshold", study_context)
+    )
+    algorithm_detail = (
+        "Give the exact temperature threshold, hotspot-area rule, contrast calculation, "
+        "connectivity rule, temporal-confirmation count/window, preprocessing, and all parameter "
+        "values used in the reported experiment."
+        if thermal_study and fire_study
+        else "Give the exact preprocessing, feature/model/rule definitions, parameter values, "
+        "decision thresholds, aggregation or confirmation logic, and software/runtime "
+        "configuration used in the reported experiment."
+    )
+    acquisition_detail = (
+        "Report the number of flights/runs, sites, dates or period, altitude and distance, fire "
+        "source and non-fire controls, environmental conditions, frame extraction, and measures "
+        "preventing near-duplicate leakage."
+        if uav_study and fire_study
+        else "Report the independent runs, batches, sites or settings, dates or period, sampling "
+        "conditions, experimental and control conditions, observation extraction, inclusion or "
+        "exclusion rules, and measures preventing near-duplicate or grouped-data leakage."
+    )
+    evaluation_detail = (
+        "Explain how parameters were chosen separately from evaluation data, how frames were "
+        "grouped by flight/site before any split, and exactly which observations produced the "
+        "reported metrics."
+        if uav_study
+        else "Explain how parameters were chosen separately from evaluation data, how observations "
+        "were grouped by their independent experimental unit before any split, and exactly which "
+        "observations produced the reported metrics."
+    )
+    calibration_detail = (
+        "Report the thermal-camera calibration/verification, emissivity and reflected-temperature "
+        "assumptions, warm-up and environmental controls, and GNSS/time synchronization checks; "
+        "otherwise explain why a calibrated temperature is not used."
+        if thermal_study and uav_study
+        else "Report instrument or sensor calibration/verification, measurement assumptions, "
+        "warm-up and environmental controls, traceability, and any synchronization checks; "
+        "otherwise give the study-specific reason calibration is not applicable."
+    )
+    permissions_detail = (
+        "Identify applicable UAV/site/fire permissions and safety controls, or provide the "
+        "journal-appropriate not-applicable explanation."
+        if uav_study or fire_study
+        else "Identify applicable ethics, site, fieldwork, hazardous-activity, data-access, and "
+        "safety approvals, or provide the journal-appropriate not-applicable explanation."
     )
     requirements = [
         _requirement(
@@ -95,11 +147,7 @@ def assess_evidence_coverage(
                 r"\b(value|set to|parameter|criterion|minimum|maximum|consecutive frames?|"
                 r"window (?:of|size)|kernel size|pixel count)\b|\d",
             ],
-            (
-                "Give the exact temperature threshold, hotspot-area rule, contrast calculation, "
-                "connectivity rule, temporal-confirmation count/window, preprocessing, and all "
-                "parameter values used in the reported experiment."
-            ),
+            algorithm_detail,
             same_claim=True,
         ),
         _requirement(
@@ -109,15 +157,11 @@ def assess_evidence_coverage(
             ledger,
             [
                 r"\b(experiment|trial|flight|collection|acquisition|captured|recorded)\b",
-                r"(?:\d+\s*(?:flight|run|site|location|day|m\b|metre|meter))|"
+                r"(?:\d+\s*(?:flight|run|trial|batch|site|location|session|day|m\b|metre|meter))|"
                 r"(?:(?:altitude|distance|duration)\s*(?:of|=|:)?\s*\d)|"
                 r"(?:(?:site|location|date|period)\s*(?:was|were|=|:)\s*[A-Za-z0-9])",
             ],
-            (
-                "Report the number of flights/runs, sites, dates or period, altitude and distance, "
-                "fire source and non-fire controls, environmental conditions, frame extraction, "
-                "and measures preventing near-duplicate leakage."
-            ),
+            acquisition_detail,
             same_claim=True,
         ),
         _requirement(
@@ -145,11 +189,7 @@ def assess_evidence_coverage(
                 r"\b(held[- ]out|test set|cross[- ]validation|split|independent test|leave[- ]one|"
                 r"thresholds? (?:fixed|selected)|no training|rule[- ]based)\b"
             ],
-            (
-                "Explain how parameters were chosen separately from evaluation data, how frames "
-                "were grouped by flight/site before any split, and exactly which observations "
-                "produced the reported metrics."
-            ),
+            evaluation_detail,
         ),
         _requirement(
             "statistical_support",
@@ -186,11 +226,7 @@ def assess_evidence_coverage(
                 r"\b(calibrat|blackbody|emissivity|temperature correction|radiometric accuracy|"
                 r"measurement uncertainty)\b"
             ],
-            (
-                "Report the thermal-camera calibration/verification, emissivity and reflected-"
-                "temperature assumptions, warm-up and environmental controls, and GNSS/time "
-                "synchronization checks; otherwise explain why a calibrated temperature is not used."
-            ),
+            calibration_detail,
         ),
         _requirement(
             "external_comparison",
@@ -219,10 +255,7 @@ def assess_evidence_coverage(
             RequirementLevel.SUBMISSION_BLOCKING,
             ledger,
             [r"\b(permission|permit|approval|regulation|authorized|safety protocol|ethics)\b"],
-            (
-                "Identify applicable UAV/site/fire permissions and safety controls, or provide the "
-                "journal-appropriate not-applicable explanation."
-            ),
+            permissions_detail,
         ),
         _requirement(
             "submission_declarations",

@@ -1,4 +1,4 @@
-# PaperForge 2.0 Architecture
+# PaperForge 2.1 Architecture
 
 ## Product boundary
 
@@ -22,14 +22,14 @@ No model response can:
 ```mermaid
 flowchart TD
     A["Topic or synopsis"] --> B["Prepare and journal profile"]
-    B --> C{"Original-study evidence complete?"}
-    C -- No --> D["Author evidence action file"]
-    C -- Yes --> E["Plan, literature, and appraisal"]
-    E --> F["Synthesis, outline, and section draft"]
+    B --> C["Evidence map and bounded plan"]
+    C --> D["Literature, appraisal, and synthesis"]
+    D --> E["One author-validation set"]
+    E --> F["Outline and evidence-bounded draft"]
     F --> G["Seven review/revision gates"]
-    G --> H{"Integrity blocker?"}
-    H -- Yes --> D
-    H -- No --> I["Audited outputs"]
+    G --> H{"Fabrication or structural blocker?"}
+    H -- Yes --> I["Preserve last accepted version"]
+    H -- No --> J["Audited outputs"]
 ```
 
 The ordered stages are:
@@ -41,16 +41,17 @@ The ordered stages are:
 5. `literature`
 6. `source_appraisal`
 7. `synthesis`
-8. `outline`
-9. `draft`
-10. `evidence_review`
-11. `methodology_review`
-12. `results_review`
-13. `discussion_review`
-14. `writing_review`
-15. `journal_review`
-16. `final_review`
-17. `export`
+8. `author_validation`
+9. `outline`
+10. `draft`
+11. `evidence_review`
+12. `methodology_review`
+13. `results_review`
+14. `discussion_review`
+15. `writing_review`
+16. `journal_review`
+17. `final_review`
+18. `export`
 
 `WorkflowEngine` is the sole transition owner. `StageRunner` implements a stage but cannot skip,
 reorder, or persist its own pass/fail state.
@@ -62,7 +63,8 @@ reorder, or persist its own pass/fail state.
 | `ProjectStore` | Atomic writes, locks, migration, versions, fingerprints | Scientific judgment |
 | `DocumentIngestor` | Extraction, checksums, locators, evidence IDs | External claims |
 | `StatisticsDeriver` | Named deterministic calculations | Guessing missing values |
-| Evidence mapper | Claim atoms, requirement coverage, pre-draft gate | Rewriting author evidence |
+| Evidence mapper | Claim atoms, requirement coverage, validation candidates | Rewriting author evidence |
+| Author validation builder | Topic relevance, known facts, literature context, stable questions | Treating pending or literature-derived content as study evidence |
 | Standards registry | Checked journal profiles and indexing context | Claiming acceptance |
 | `LiteratureService` | Search, deduplication, DOI verification, ranking | Manuscript findings |
 | `LLMClient` | Structured-output validation and bounded repair | Workflow transitions |
@@ -77,14 +79,21 @@ User-controlled project files are authoritative for study-specific facts. Each e
 a stable `EV-*` ID, kind, source path, locator, checksum, and bounded content. Original-study records
 are split into exact `CLM-*` atoms; the claim ledger retains the source evidence and numeric atoms.
 
-The pre-draft coverage gate distinguishes:
+The coverage model distinguishes:
 
 - `draft_blocking`: a defensible original paper cannot be written yet;
 - `submission_blocking`: drafting can proceed only with a transparent unresolved author action;
 - `recommended`: useful strengthening work that is not falsely treated as mandatory.
 
-`inputs/responses.yaml` and its compatibility aliases are read-only author evidence. The workflow
-writes questions only to `author-actions/evidence-required.md`.
+In the default `research_then_validate` mode these levels determine manuscript treatment and final
+readiness, not whether research and drafting may begin. `strict_pre_draft` is an explicit opt-in mode
+for organizations that require the old stop-before-draft policy.
+
+`inputs/responses.yaml` and its compatibility aliases remain read-only author evidence. After
+literature synthesis, the workflow writes one `author-actions/validation.yaml` containing stable
+topic-applicable items, already supplied facts, and the most relevant verified source context. Only
+resolved `decision` and `answer` fields are ingested on a later run. Pending questions and literature
+context never enter the study claim ledger.
 
 Computed evidence is allowed only through named deterministic calculators with explicit inputs and a
 formula version. Confusion-matrix calculations require all four raw counts.
@@ -170,21 +179,25 @@ that the activity occurred.
 
 ## Resumption, invalidation, and migration
 
-State schema 4 is stored in `audit/state.json`. The input fingerprint covers profile fields,
+State schema 5 is stored in `audit/state.json`. The input fingerprint covers profile fields,
 configuration, and user-controlled content in `inputs/`, `sources/`, `data/`, and `figures/`; generated
-outputs do not affect it. An input/configuration change versions the current manuscript and resets
-generated state. A normal rerun resumes completed stages without repeated provider calls.
+outputs do not affect it. For `author-actions/validation.yaml`, only author-edited decisions and
+answers affect the fingerprint, so generation of a pending validation set does not cause a spurious
+rebuild. An input/configuration change versions the current manuscript and resets generated state. A
+normal rerun resumes completed stages without repeated provider calls.
 
-Schema-3 (PaperForge 1.0) migration preserves `state.v3.json`, `paperforge.v3.yaml`, and
-`legacy-v1.0.0.md`. Older v0.2 projects retain their v2 backups and `legacy-v0.2.1.md`. In both cases,
-the schema-4 workflow rebuilds generated artifacts from untouched author inputs.
+Schema-4 (PaperForge 2.0) migration preserves `state.v4.json`, `paperforge.v4.yaml`, and
+`legacy-v2.0.0.md`. Schema-3 (PaperForge 1.0) migration preserves `state.v3.json`, `paperforge.v3.yaml`, and
+`legacy-v1.0.0.md`. Older v0.2 projects retain their v2 backups and `legacy-v0.2.1.md`. In every case,
+the schema-5 workflow rebuilds generated artifacts from untouched author inputs.
 
 ## Failure and privacy semantics
 
 - Provider, schema, filesystem, and literature failures are explicit and resumable.
 - Authentication/authorization/not-found HTTP failures are not retried; transient limits and network
   errors use bounded retries.
-- An evidence-mapping block occurs before any manuscript exists.
+- Evidence gaps continue into bounded drafting by default; only explicit `strict_pre_draft` mode
+  blocks at evidence mapping.
 - A later integrity block preserves and exports the last accepted manuscript plus its audit report.
 - Only `passed` and `passed_with_actions` stages advance.
 - Project evidence is sent to the configured model provider. Search queries and bibliographic IDs are

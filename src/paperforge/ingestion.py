@@ -10,8 +10,9 @@ from pathlib import Path
 
 import yaml
 
+from paperforge.author_validation import load_author_validation, validation_evidence
 from paperforge.config import IngestionConfig
-from paperforge.domain import EvidenceItem, EvidenceKind
+from paperforge.domain import AuthorValidationDecision, EvidenceItem, EvidenceKind
 from paperforge.storage import ProjectStore
 
 TEXT_EXTENSIONS = {".txt", ".md", ".rst", ".tex", ".bib", ".ris", ".yaml", ".yml"}
@@ -107,6 +108,31 @@ class DocumentIngestor:
                 )
             )
             report.extracted += 1
+
+        if self.store.author_validation_path.exists():
+            package = load_author_validation(self.store.author_validation_path)
+            report.discovered += 1
+            validation_item = validation_evidence(package)
+            if validation_item:
+                ingested.append(validation_item)
+                fingerprint.update(validation_item.checksum.encode("ascii"))
+                report.extracted += 1
+            for item in package.items:
+                if item.decision == AuthorValidationDecision.PENDING and item.answer:
+                    report.warnings.append(
+                        f"Ignored {item.id} answer because its decision is still 'pending'."
+                    )
+                if (
+                    item.decision
+                    in {
+                        AuthorValidationDecision.PROVIDED,
+                        AuthorValidationDecision.CORRECTED,
+                    }
+                    and not item.answer
+                ):
+                    report.warnings.append(
+                        f"Ignored {item.id} because decision '{item.decision.value}' requires an answer."
+                    )
 
         self.store.save_evidence(generated + ingested)
         report.fingerprint = fingerprint.hexdigest()

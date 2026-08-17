@@ -1,4 +1,4 @@
-# PaperForge 2.0 Publication Standard
+# PaperForge 2.1 Publication Standard
 
 Checked on 2026-08-13. These sources inform the built-in rules and review dimensions; authors must
 still recheck the live target-journal page immediately before submission.
@@ -90,3 +90,8 @@ Source:
 blocker, required author action, or unchecked publication contract, and the final deterministic score
 meets configuration. It means “credible submission candidate after author verification,” not
 “accepted,” “Scopus compliant,” “SCIE compliant,” or “plagiarism free.”
+
+Missing study records do not prevent PaperForge from researching, drafting, reviewing, and exporting
+in its default mode. They remain explicit author-validation items, and the manuscript must omit the
+unsupported detail or disclose that it was not documented. Published methods may guide the reporting
+question and discussion, but can never be substituted for the protocol actually performed.

@@ -1,7 +1,8 @@
-# Migrating to PaperForge 2.0
+# Migrating to PaperForge 2.1
 
-PaperForge 2.0 replaces the v1 whole-manuscript repair behavior with a publication-contract,
-claim-ledger, pre-draft evidence gate, structured section drafting, and targeted revision workflow.
+PaperForge 2.1 keeps the publication-contract, claim-ledger, structured section drafting, and
+targeted revision safeguards while replacing the default pre-draft interrogation loop with a
+research-first, one-pass author-validation workflow.
 
 ## 1. Preserve an external backup
 
@@ -20,7 +21,7 @@ paperforge --version
 Expected:
 
 ```text
-PaperForge 2.0.0
+PaperForge 2.1.0
 ```
 
 ## 3. Rebuild generated stages
@@ -32,6 +33,15 @@ paperforge run projects\uav-fire-paper --rebuild
 Do not run `paperforge init` against an existing project.
 
 ## Automatic preservation
+
+From a PaperForge 2.0/schema-4 project:
+
+| Existing artifact | Preserved copy |
+| --- | --- |
+| `paperforge.yaml` | `paperforge.v4.yaml` |
+| `audit/state.json` | `audit/state.v4.json` |
+| `manuscript/current.md` | `manuscript/versions/legacy-v2.0.0.md` |
+| response/input files | Original files remain unchanged |
 
 From a PaperForge 1.0/schema-3 project:
 
@@ -57,15 +67,23 @@ existing `respones.yml` file are also recognized.
 
 The five original UAV answers establish that an original experiment exists, but they do not fully
 specify the algorithm parameters, acquisition protocol, annotation protocol, evaluation independence,
-raw outcome counts/uncertainty, or calibration. PaperForge 2.0 therefore stops at `evidence_mapping`
-before drafting and writes exact prompts to `author-actions/evidence-required.md`. Add authentic
-answers to the existing response YAML and rerun; never fill unavailable facts by estimation.
+raw outcome counts/uncertainty, or calibration. PaperForge 2.1 records those gaps, continues through
+literature research, drafting, review, and export, and writes one
+`author-actions/validation.yaml` after synthesis.
+
+Review that file once after the run. Change only `decision` and `answer`; use authentic records or
+explicitly choose `not_available`/`not_applicable`. A pending generated file does not invalidate the
+completed workflow. A later rerun imports only resolved author decisions and never imports its
+literature context as study evidence.
 
 ## Changed behavior
 
-- The 17-stage pipeline begins with a checked publication profile and evidence coverage.
+- The 18-stage pipeline begins with a checked publication profile and evidence coverage.
 - A topic-only project becomes a review article rather than a fictional experiment.
-- An incomplete original study stops before literature/drafting instead of producing a shallow draft.
+- An incomplete original study receives literature-informed reporting context and a bounded draft;
+  missing author-only facts remain visible and keep readiness at `author_action_required`.
+- One consolidated author-validation stage runs after synthesis, without model-generated interactive
+  questions or repeated pre-draft stops.
 - Source appraisal and discussion review are independent stages.
 - The outline locks one authoritative major-section sequence.
 - Draft and revision responses are structured section objects.
@@ -76,6 +94,13 @@ answers to the existing response YAML and rerun; never fill unavailable facts by
   evidence.
 - Unknown target-journal rules prevent a false submission-ready result.
 - DOCX section/reference numbering and the audit/submission output package are deterministic.
+
+To retain the PaperForge 2.0 stop-before-draft behavior deliberately:
+
+```yaml
+workflow:
+  evidence_gap_mode: strict_pre_draft
+```
 
 ## Recovery
 

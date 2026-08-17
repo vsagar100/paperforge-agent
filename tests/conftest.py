@@ -432,6 +432,7 @@ def _draft_sections(context: dict) -> list[dict]:
             "conflict of interest",
             "data availability",
             "author contributions",
+            "declaration of ai use",
         }:
             body = (
                 "The author must verify this declaration against the intended submission. No external "

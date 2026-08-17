@@ -27,7 +27,7 @@ class WorkflowReport:
 
 
 class WorkflowEngine:
-    """Resumable, deterministic state machine for the PaperForge 2.0 pipeline."""
+    """Resumable, deterministic state machine for the PaperForge 2.1 pipeline."""
 
     def __init__(
         self,

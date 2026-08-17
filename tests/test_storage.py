@@ -46,7 +46,7 @@ def test_v2_state_migration_preserves_legacy_manuscript_and_responses(
         },
     )
     state = store.load_state()
-    assert state.schema_version == 4
+    assert state.schema_version == 5
     assert state.project_id == "legacy-project"
     assert state.stage_status == {}
     assert (store.root / "audit" / "state.v2.json").exists()
@@ -68,3 +68,27 @@ def test_input_fingerprint_changes_only_for_user_controlled_inputs(
     assert project_store.input_fingerprint(state) == before
     project_store.write_text("inputs/research_brief.md", "updated user evidence")
     assert project_store.input_fingerprint(state) != before
+
+
+def test_v2_state_migrates_to_research_first_workflow(
+    tmp_path: Path,
+    default_config_path: Path,
+) -> None:
+    store = ProjectStore(tmp_path / "v2-paper")
+    state = store.initialize(
+        ResearchProfile(topic="Legacy PaperForge 2.0 thermal experiment"),
+        default_config_path,
+    )
+    store.write_text("manuscript/current.md", "# PaperForge 2.0 manuscript\n\nPreserve me.\n")
+    payload = state.model_dump(mode="json")
+    payload["schema_version"] = 4
+    payload["stage_status"] = {"prepare": "passed"}
+    store.write_json("audit/state.json", payload)
+
+    migrated = store.load_state()
+
+    assert migrated.schema_version == 5
+    assert migrated.stage_status == {}
+    assert (store.root / "audit" / "state.v4.json").exists()
+    assert (store.root / "manuscript" / "versions" / "legacy-v2.0.0.md").exists()
+    assert any("research-first validation workflow" in note for note in migrated.migration_notes)

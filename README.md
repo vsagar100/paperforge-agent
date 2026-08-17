@@ -1,4 +1,4 @@
-# PaperForge Agent 2.0
+# PaperForge Agent 2.1
 
 PaperForge turns one topic or synopsis into an evidence-constrained manuscript through a resumable,
 multi-stage publication workflow. It searches and appraises literature, drafts exact journal
@@ -55,17 +55,26 @@ paperforge run projects\uav-fire-paper
 - A topic without authentic study methods and results becomes a review article.
 - A synopsis or project evidence containing original methods and results becomes an original
   research candidate.
-- An original study that lacks reproducibility-critical facts stops **before drafting**. PaperForge
-  writes `author-actions/evidence-required.md` with exact missing details, preserves all inputs, and
-  waits for author evidence.
+- An incomplete original study does **not** stop the default workflow. PaperForge maps the gaps,
+  researches relevant reporting practice, drafts only what the evidence supports, discloses what is
+  not documented, and completes the review/export package.
+- After literature synthesis, PaperForge writes one topic-specific
+  `author-actions/validation.yaml`. The author reviews it once after the run; pending entries are
+  never treated as evidence and never trigger a rebuild by themselves.
 - An unsupported request for `original_research` falls back to a review article by default instead
   of manufacturing an experiment.
 
-Save each author response once under `answers:` in `inputs/responses.yaml` and rerun. The aliases
+Existing author facts may still be saved once under `answers:` in `inputs/responses.yaml`. The aliases
 `responses.yml`, `respones.yaml`, and `respones.yml` are also imported for compatibility, but
 `responses.yaml` is recommended.
 
-For an original engineering experiment, the pre-draft gate checks at least:
+For the post-run validation file, change only `decision` and `answer`. Use `provided` or `corrected`
+with the authentic study fact, `not_available` when the record does not exist, or `not_applicable`
+with a short explanation. Rerun only when those decisions should be incorporated. Literature-linked
+guidance in that file is context for reporting; it is never evidence that the experiment used a
+particular procedure.
+
+For an original engineering experiment, the evidence map and validation set check at least:
 
 - system/material specifications and the configuration actually tested;
 - exact algorithm and decision parameters;
@@ -79,17 +88,25 @@ For an original engineering experiment, the pre-draft gate checks at least:
 Submission declarations, repository availability, permissions, and recommended comparisons are
 tracked separately. PaperForge never fills them by assumption.
 
+The legacy blocking behavior remains available for teams that explicitly require it:
+
+```yaml
+workflow:
+  evidence_gap_mode: strict_pre_draft
+```
+
 ## Publication workflow
 
 | Stage | Contract |
 | --- | --- |
 | Prepare | Extract files, preserve provenance, and derive only supported statistics |
 | Journal profile | Resolve article type and a checked publication contract |
-| Evidence mapping | Build an exact claim ledger and block an indefensible original draft |
+| Evidence mapping | Build an exact claim ledger and classify unsupported study details without stopping the default run |
 | Plan | Define the question, objectives, scope, contribution, and search strategy |
 | Literature | Search OpenAlex, deduplicate records, and verify DOI metadata where possible |
 | Source appraisal | Record verification, abstract coverage, recency, diversity, and retractions |
 | Synthesis | Build source-level notes, themes, gap, and bounded novelty position |
+| Author validation | Collate one topic-applicable, research-linked author check while keeping pending content out of evidence |
 | Outline | Lock one ordered section set with evidence, claim, reference, and display-item links |
 | Draft | Generate schema-validated sections in bounded batches |
 | Evidence review | Check citations, numeric provenance, literature grounding, and source coverage |
@@ -116,7 +133,7 @@ manuscript-acceptance checklist. PaperForge therefore applies:
 3. peer-review dimensions such as contribution, literature coverage, method soundness, results,
    discussion, clarity, references, and declarations.
 
-Version 2.0 contains a checked DJES research/review profile. An unknown journal uses a conservative
+Version 2.1 contains a checked DJES research/review profile. An unknown journal uses a conservative
 engineering profile and remains `author_action_required` until its live instructions and submission
 files are verified. See [Publication Standard](docs/PUBLICATION_STANDARD.md) for the official
 sources, checked rules, and the comparable UAV/thermal-paper benchmark used in the redesign.
@@ -157,7 +174,9 @@ metadata, or abstract; a citation cannot legitimize an invented study result.
 
 ```text
 project/
-├── author-actions/evidence-required.md
+├── author-actions/
+│   ├── validation.yaml
+│   └── validation.md
 ├── evidence/
 │   ├── registry.json
 │   ├── claim-ledger.json
@@ -183,6 +202,7 @@ project/
     ├── literature-matrix.csv
     ├── publication-profile.md
     ├── evidence-coverage.md
+    ├── author-validation.md
     ├── display-item-plan.md
     ├── submission-checklist.md
     ├── quality-report.json
@@ -232,7 +252,7 @@ paperforge run projects\uav-fire-paper --rebuild
 Expected version:
 
 ```text
-PaperForge 2.0.0
+PaperForge 2.1.0
 ```
 
 Migration is non-destructive: legacy configuration/state files and the prior generated manuscript
@@ -258,8 +278,9 @@ python -m pytest
 python -m build
 ```
 
-The regression suite includes the supplied five-answer UAV case, malformed citation variants,
+The regression suite includes the supplied five-answer UAV case continuing through export with one
+post-run validation set, pending-validation idempotency, validated-answer ingestion, malformed citation variants,
 fabricated declarations, duplicate sections, unsupported numeric claims, section injection,
-revision preservation, migration, export numbering, and a complete-protocol pre-draft pass case.
+revision preservation, migration, export numbering, and strict-mode compatibility.
 
 See [Architecture](docs/ARCHITECTURE.md) for the state machine and trust boundaries.

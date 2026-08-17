@@ -14,7 +14,13 @@ from docx import Document
 from docx.shared import RGBColor
 
 from paperforge.config import load_config
-from paperforge.domain import PaperType, ResearchProfile, StageStatus
+from paperforge.domain import (
+    AuthorValidationDecision,
+    EvidenceCoverageStatus,
+    PaperType,
+    ResearchProfile,
+    StageStatus,
+)
 from paperforge.llm import LLMClient
 from paperforge.stages import StageRunner
 from paperforge.storage import ProjectStore
@@ -124,7 +130,7 @@ def test_rejected_revision_is_preserved_and_retried(project_store: ProjectStore)
     assert "deliberately incomplete revision" not in project_store.read_manuscript()
 
 
-def test_incomplete_uav_study_stops_before_drafting_with_specific_evidence_gaps(
+def test_incomplete_uav_study_researches_drafts_and_defers_one_validation_pass(
     tmp_path: Path,
     default_config_path: Path,
 ) -> None:
@@ -141,6 +147,7 @@ def test_incomplete_uav_study_stops_before_drafting_with_specific_evidence_gaps(
     config_payload["quality"]["minimum_verified_sources"] = 3
     config_payload["quality"]["minimum_cited_sources"] = 3
     config_payload["quality"]["minimum_manuscript_words"] = 300
+    config_payload["quality"]["require_section_depth"] = False
     config_payload["literature"]["min_sources"] = 3
     config_payload["literature"]["target_sources"] = 6
     config_payload["literature"]["max_sources"] = 8
@@ -194,21 +201,104 @@ def test_incomplete_uav_study_stops_before_drafting_with_specific_evidence_gaps(
         yaml.safe_dump(responses, sort_keys=False),
     )
     provider = UAVRegressionProvider()
-    engine, _ = engine_for(store, provider)
+    engine, literature = engine_for(store, provider)
     report = engine.run()
     state = store.load_state()
     evidence_mapping = state.stage_records["evidence_mapping"]
 
-    assert report.records[-1].stage == "evidence_mapping"
+    assert report.records[-1].stage == "export"
     assert state.profile.resolved_paper_type == PaperType.ORIGINAL_RESEARCH
-    assert evidence_mapping.status == StageStatus.BLOCKED
+    assert evidence_mapping.status == StageStatus.PASSED_WITH_ACTIONS
+    assert state.stage_records["author_validation"].status == StageStatus.PASSED_WITH_ACTIONS
+    assert state.workflow_completed is True
     assert state.submission_ready is False
     codes = {issue.code for issue in evidence_mapping.issues}
-    assert "insufficient_study_evidence_algorithm_parameters" in codes
-    assert "insufficient_study_evidence_evaluation_independence" in codes
-    assert "insufficient_study_evidence_statistical_support" in codes
-    assert "insufficient_study_evidence_calibration" in codes
+    assert "unverified_study_detail_algorithm_parameters" in codes
+    assert "unverified_study_detail_evaluation_independence" in codes
+    assert "unverified_study_detail_statistical_support" in codes
+    assert "unverified_study_detail_calibration" in codes
+    assert store.read_manuscript().strip()
+    assert (store.root / "outputs" / "manuscript.docx").exists()
+    validation = store.load_author_validation()
+    validation_codes = {item.requirement_code for item in validation.pending_items}
+    assert "acquisition_protocol" in validation_codes
+    assert "ground_truth_protocol" in validation_codes
+    assert "algorithm_parameters" in validation_codes
+    assert all(item.literature_context for item in validation.items)
+    assert literature.calls == 1
+    assert provider.calls["plan"] == 1
+    assert provider.calls["synthesis"] == 1
+    manuscript = store.read_manuscript().casefold()
+    assert "12 flights" not in manuscript
+    assert "two independent experts" not in manuscript
+    calls_after_first = provider.calls.copy()
+    second = engine.run()
+    assert second.records == []
+    assert second.invalidated is False
+    assert provider.calls == calls_after_first
+
+    acquisition = next(
+        item for item in validation.items if item.requirement_code == "acquisition_protocol"
+    )
+    acquisition.decision = AuthorValidationDecision.PROVIDED
+    acquisition.answer = (
+        "The experiment comprised 6 flights at Site A at an altitude of 20 m; all frames were "
+        "grouped by flight before evaluation."
+    )
+    store.save_author_validation(validation)
+    third = engine.run()
+    assert third.invalidated is True
+    updated_coverage = store.load_evidence_coverage()
+    updated_acquisition = next(
+        item for item in updated_coverage.requirements if item.code == "acquisition_protocol"
+    )
+    assert updated_acquisition.status == EvidenceCoverageStatus.SUPPORTED
+    assert any(
+        evidence.id == "EV-AUTHOR-VALIDATION" and "6 flights at Site A" in evidence.content
+        for evidence in store.load_evidence()
+    )
+    rebuilt_validation = store.load_author_validation()
+    assert all(
+        "search timestamp" not in fact.casefold() and "discovered records" not in fact.casefold()
+        for item in rebuilt_validation.items
+        for fact in item.known_facts
+    )
+
+
+def test_strict_pre_draft_mode_remains_available(
+    tmp_path: Path,
+    default_config_path: Path,
+) -> None:
+    store = ProjectStore(tmp_path / "strict-paper")
+    store.initialize(
+        ResearchProfile(
+            topic="UAV thermal fire detection experiment",
+            requested_paper_type=PaperType.ORIGINAL_RESEARCH,
+        ),
+        default_config_path,
+    )
+    store.write_text(
+        "inputs/responses.yaml",
+        yaml.safe_dump(
+            {
+                "answers": {
+                    "Q-001": (
+                        "A Raspberry Pi thermal-camera experiment evaluated 1,000 labelled "
+                        "frames and achieved 96.8% accuracy."
+                    )
+                }
+            },
+            sort_keys=False,
+        ),
+    )
+    payload = yaml.safe_load(store.config_path.read_text(encoding="utf-8"))
+    payload["workflow"]["evidence_gap_mode"] = "strict_pre_draft"
+    store.config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    engine, literature = engine_for(store, ScriptedProvider())
+
+    report = engine.run()
+
+    assert report.records[-1].stage == "evidence_mapping"
+    assert report.records[-1].status == StageStatus.BLOCKED
+    assert literature.calls == 0
     assert not store.read_manuscript().strip()
-    questions = (store.root / "author-actions" / "evidence-required.md").read_text(encoding="utf-8")
-    assert "temperature threshold" in questions
-    assert "confusion-matrix counts" in questions

@@ -25,6 +25,9 @@ Non-negotiable rules:
     or AI-use declarations unless the supplied evidence states them directly.
 12. A citation does not authorize a study-specific claim. External source findings and this study's
     methods/results must remain visibly separate.
+13. Pending author-validation items are not evidence. Use their literature context only to explain
+    established reporting practice, never to reconstruct what the study did. A `not_available`
+    decision authorizes transparent disclosure of the gap, not invention of the missing procedure.
 """
 
 PLANNER_SYSTEM = (
@@ -169,7 +172,9 @@ def draft_prompt(context: dict[str, Any]) -> str:
         "only its assigned claims/evidence and permitted sources. Include a compact Markdown table in "
         "Results when a planned table is fully supported. Cite only allowed references with markers "
         "such as [@REF001] or [@REF001; @REF002]. Do not add a References section. Do not mention "
-        "PaperForge, claim IDs, or evidence IDs in body text.\n\nCONTEXT:\n" + _json(context)
+        "PaperForge, claim IDs, or evidence IDs in body text. Where author validation remains "
+        "pending, omit the unsupported detail or describe it in publishable prose as not documented; "
+        "do not copy the validation question into the manuscript.\n\nCONTEXT:\n" + _json(context)
     )
 
 

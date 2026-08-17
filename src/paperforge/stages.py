@@ -5,6 +5,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from paperforge.author_validation import (
+    author_validation_markdown,
+    build_author_validation_package,
+)
 from paperforge.citations import normalize_citation_markers
 from paperforge.config import AppConfig
 from paperforge.domain import (
@@ -139,22 +143,52 @@ class StageRunner:
             state, self.store.load_evidence()
         )
         ledger = build_claim_ledger(self.store.load_evidence())
-        coverage = assess_evidence_coverage(paper_type, ledger)
+        coverage = assess_evidence_coverage(
+            paper_type,
+            ledger,
+            topic=state.profile.topic,
+        )
         self.store.save_claim_ledger(ledger)
         self.store.save_evidence_coverage(coverage)
-        self.store.write_text(
-            "author-actions/evidence-required.md",
-            author_questions_markdown(coverage),
-        )
         blockers = [
             item
             for item in coverage.requirements
             if item.level == RequirementLevel.DRAFT_BLOCKING
             and item.status != EvidenceCoverageStatus.SUPPORTED
         ]
-        issues = [self._coverage_issue(item) for item in blockers]
+        unresolved = [
+            item
+            for item in coverage.requirements
+            if item.status != EvidenceCoverageStatus.SUPPORTED
+        ]
+        strict = self.config.workflow.evidence_gap_mode == "strict_pre_draft"
+        issues = [
+            self._coverage_issue(item, blocking=strict)
+            for item in (blockers if strict else unresolved)
+        ]
+        artifacts = ["evidence/claim-ledger.json", "evidence/coverage.json"]
+        if strict:
+            self.store.write_text(
+                "author-actions/evidence-required.md",
+                author_questions_markdown(coverage),
+            )
+            artifacts.append("author-actions/evidence-required.md")
+        elif (self.store.root / "author-actions" / "evidence-required.md").exists():
+            self.store.write_text(
+                "author-actions/evidence-required.md",
+                "# Replaced by research-first validation\n\n"
+                "No response is required before drafting. PaperForge will complete research and "
+                "the manuscript, then write the consolidated `validation.yaml` file in this "
+                "directory.\n",
+            )
         return StageOutcome(
-            status=StageStatus.BLOCKED if blockers else StageStatus.PASSED,
+            status=(
+                StageStatus.BLOCKED
+                if strict and blockers
+                else StageStatus.PASSED_WITH_ACTIONS
+                if unresolved
+                else StageStatus.PASSED
+            ),
             score=(
                 1.0
                 if not coverage.requirements
@@ -165,14 +199,12 @@ class StageRunner:
                 / len(coverage.requirements)
             ),
             issues=issues,
-            artifacts=[
-                "evidence/claim-ledger.json",
-                "evidence/coverage.json",
-                "author-actions/evidence-required.md",
-            ],
+            artifacts=artifacts,
             notes=[
                 f"Registered {len(ledger.claims)} exact claim atoms; "
-                f"{len(blockers)} draft-blocking evidence gap(s)."
+                f"{len(unresolved)} item(s) require later author validation."
+                if not strict
+                else f"{len(blockers)} strict pre-draft evidence gap(s)."
             ],
         )
 
@@ -384,6 +416,40 @@ class StageRunner:
             model=response.model,
         )
 
+    def _stage_author_validation(self, state: WorkflowState) -> StageOutcome:
+        existing = (
+            self.store.load_author_validation()
+            if self.store.author_validation_path.exists()
+            else None
+        )
+        package = build_author_validation_package(
+            topic=state.profile.topic,
+            coverage=self.store.load_evidence_coverage(),
+            ledger=self.store.load_claim_ledger(),
+            references=self.store.load_references(),
+            synthesis=self.store.load_synthesis(),
+            existing=existing,
+        )
+        self.store.save_author_validation(package)
+        self.store.write_text(
+            "author-actions/validation.md",
+            author_validation_markdown(package),
+        )
+        pending = package.pending_items
+        resolved = len(package.items) - len(pending)
+        return StageOutcome(
+            status=StageStatus.PASSED_WITH_ACTIONS if pending else StageStatus.PASSED,
+            score=resolved / len(package.items) if package.items else 1.0,
+            artifacts=[
+                "author-actions/validation.yaml",
+                "author-actions/validation.md",
+            ],
+            notes=[
+                f"Collated {len(package.items)} topic-applicable validation item(s) after "
+                f"literature research; {len(pending)} await one author review."
+            ],
+        )
+
     def _stage_outline(self, state: WorkflowState) -> StageOutcome:
         del state
         plan = self.store.load_plan()
@@ -396,6 +462,7 @@ class StageRunner:
             "research_plan": plan.model_dump(mode="json"),
             "publication_profile": profile.model_dump(mode="json"),
             "literature_synthesis": synthesis.model_dump(mode="json"),
+            "author_validation": self._author_validation_context(),
             "registered_claims": self._claim_context(ledger.claims),
             "allowed_claim_ids": [item.id for item in ledger.claims],
             "allowed_evidence_ids": [item.id for item in evidence],
@@ -457,6 +524,7 @@ class StageRunner:
                 "research_plan": plan.model_dump(mode="json"),
                 "publication_profile": profile.model_dump(mode="json"),
                 "literature_synthesis": synthesis.model_dump(mode="json"),
+                "author_validation": self._author_validation_context(),
                 "requested_sections": [section.model_dump(mode="json") for section in sections],
                 "assigned_claims": self._claim_context(
                     [claims_by_id[item] for item in claim_ids if item in claims_by_id]
@@ -735,10 +803,15 @@ class StageRunner:
         seen: set[str] = set()
         for item in [*profile_order, *proposed]:
             normalized = normalize_heading(item)
-            if not normalized or normalized == "references" or normalized in seen:
+            canonical = (
+                "original research methodology"
+                if normalized in {"methodology", "materials and methods", "methods"}
+                else normalized
+            )
+            if not normalized or normalized == "references" or canonical in seen:
                 continue
             required.append(item.strip())
-            seen.add(normalized)
+            seen.add(canonical)
         return required
 
     def _validation_context(self) -> ValidationContext:
@@ -763,6 +836,7 @@ class StageRunner:
             "research_plan": self.store.load_plan().model_dump(mode="json"),
             "publication_profile": self.store.load_publication_profile().model_dump(mode="json"),
             "evidence_coverage": self.store.load_evidence_coverage().model_dump(mode="json"),
+            "author_validation": self._author_validation_context(),
             "manuscript": manuscript[: self.config.context.max_manuscript_chars],
             "verified_reference_ids": [
                 item.id for item in self.store.load_references() if item.verified
@@ -802,6 +876,7 @@ class StageRunner:
             "review_type": review_type,
             "research_plan": self.store.load_plan().model_dump(mode="json"),
             "publication_profile": self.store.load_publication_profile().model_dump(mode="json"),
+            "author_validation": self._author_validation_context(),
             "requested_sections": [
                 {
                     **section.model_dump(mode="json"),
@@ -1155,22 +1230,49 @@ class StageRunner:
                 break
         return selected
 
+    def _author_validation_context(self) -> dict[str, Any]:
+        if not self.store.author_validation_path.exists():
+            return {}
+        return self.store.load_author_validation().model_dump(mode="json")
+
     @staticmethod
-    def _coverage_issue(requirement) -> ReviewIssue:
+    def _coverage_issue(requirement, *, blocking: bool) -> ReviewIssue:
         digest = hashlib.sha1(requirement.code.encode()).hexdigest()[:10].upper()
+        if blocking:
+            return ReviewIssue(
+                id=f"EVID-{digest}",
+                code=f"insufficient_study_evidence_{requirement.code}",
+                severity=Severity.BLOCKING,
+                section="Evidence",
+                description=(
+                    f"{requirement.label} is {requirement.status.value.replace('_', ' ')}: "
+                    f"{requirement.explanation}"
+                ),
+                required_change=requirement.requested_detail
+                or "Supply the missing study evidence.",
+                evidence_ids=[],
+                requires_new_evidence=True,
+                disposition=IssueDisposition.INTEGRITY_BLOCKER,
+            )
+        recommended = requirement.level == RequirementLevel.RECOMMENDED
         return ReviewIssue(
             id=f"EVID-{digest}",
-            code=f"insufficient_study_evidence_{requirement.code}",
-            severity=Severity.BLOCKING,
-            section="Evidence",
+            code=f"unverified_study_detail_{requirement.code}",
+            severity=Severity.LOW if recommended else Severity.HIGH,
+            section="Author Validation",
             description=(
                 f"{requirement.label} is {requirement.status.value.replace('_', ' ')}: "
-                f"{requirement.explanation}"
+                f"{requirement.explanation} The workflow will continue without inventing it."
             ),
-            required_change=requirement.requested_detail or "Supply the missing study evidence.",
+            required_change=(
+                "Review the consolidated author-actions/validation.yaml item after manuscript "
+                f"generation. {requirement.requested_detail or ''}"
+            ).strip(),
             evidence_ids=[],
             requires_new_evidence=True,
-            disposition=IssueDisposition.INTEGRITY_BLOCKER,
+            disposition=(
+                IssueDisposition.RECOMMENDATION if recommended else IssueDisposition.AUTHOR_ACTION
+            ),
         )
 
     @staticmethod
@@ -1190,7 +1292,7 @@ class StageRunner:
                 body = sections.get("related work") or sections.get("literature review") or ""
                 minimum = (
                     section_minimum(context.publication_profile, "Related Work")
-                    if context.publication_profile
+                    if context.publication_profile and context.config.quality.require_section_depth
                     else 30
                 )
                 if len(body.split()) >= minimum:
@@ -1206,7 +1308,7 @@ class StageRunner:
                 body = sections.get(normalize_heading(issue.section), "")
                 minimum = (
                     section_minimum(context.publication_profile, issue.section)
-                    if context.publication_profile
+                    if context.publication_profile and context.config.quality.require_section_depth
                     else 30
                 )
                 if len(body.split()) >= minimum:

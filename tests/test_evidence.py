@@ -51,3 +51,49 @@ def test_complete_protocol_can_pass_the_pre_draft_evidence_gate() -> None:
         build_claim_ledger(evidence),
     )
     assert coverage.draft_blockers == []
+
+
+def test_literature_search_manifest_never_becomes_study_claim_evidence() -> None:
+    ledger = build_claim_ledger(
+        [
+            EvidenceItem(
+                id="EV-COMPUTED-LITERATURE-SEARCH",
+                kind=EvidenceKind.COMPUTED,
+                title="Literature search manifest",
+                content=(
+                    "Discovered records: 200. Selected records: 30. Externally indexed records: 30."
+                ),
+                metadata={
+                    "generated": True,
+                    "calculator": "literature_search_manifest",
+                },
+            )
+        ]
+    )
+    assert ledger.claims == []
+
+
+def test_requirement_details_are_tailored_beyond_the_uav_thermal_domain() -> None:
+    ledger = build_claim_ledger(
+        [
+            EvidenceItem(
+                id="EV-MATERIAL",
+                kind=EvidenceKind.EXPERIMENTAL_DATA,
+                title="Materials experiment",
+                content=(
+                    "A universal testing machine evaluated labelled concrete specimens, and the "
+                    "reported results include compressive strength."
+                ),
+            )
+        ]
+    )
+    coverage = assess_evidence_coverage(
+        PaperType.ORIGINAL_RESEARCH,
+        ledger,
+        topic="Machine-learning prediction of concrete compressive strength",
+    )
+    requirements = {item.code: item for item in coverage.requirements}
+    assert "temperature threshold" not in requirements["algorithm_parameters"].requested_detail
+    assert "flights" not in requirements["acquisition_protocol"].requested_detail
+    assert "UAV" not in requirements["permissions_safety"].requested_detail
+    assert "instrument or sensor" in requirements["calibration"].requested_detail

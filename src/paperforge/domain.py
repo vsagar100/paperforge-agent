@@ -7,7 +7,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-CURRENT_STATE_SCHEMA = 4
+CURRENT_STATE_SCHEMA = 5
 
 
 def utc_now() -> datetime:
@@ -66,6 +66,14 @@ class RequirementLevel(StrEnum):
     DRAFT_BLOCKING = "draft_blocking"
     SUBMISSION_BLOCKING = "submission_blocking"
     RECOMMENDED = "recommended"
+
+
+class AuthorValidationDecision(StrEnum):
+    PENDING = "pending"
+    PROVIDED = "provided"
+    CORRECTED = "corrected"
+    NOT_AVAILABLE = "not_available"
+    NOT_APPLICABLE = "not_applicable"
 
 
 class EvidenceItem(BaseModel):
@@ -149,6 +157,51 @@ class EvidenceCoverage(BaseModel):
             if item.level == RequirementLevel.DRAFT_BLOCKING
             and item.status != EvidenceCoverageStatus.SUPPORTED
         ]
+
+
+class AuthorValidationItem(BaseModel):
+    id: str = Field(pattern=r"^VAL-[A-Z0-9_-]+$")
+    requirement_code: str
+    label: str
+    level: RequirementLevel
+    evidence_status: EvidenceCoverageStatus
+    why_relevant: str
+    question: str
+    known_facts: list[str] = Field(default_factory=list)
+    literature_context: list[str] = Field(default_factory=list)
+    reference_ids: list[str] = Field(default_factory=list)
+    manuscript_treatment: str
+    decision: AuthorValidationDecision = AuthorValidationDecision.PENDING
+    answer: str = ""
+
+    @field_validator("answer")
+    @classmethod
+    def normalize_answer(cls, value: str) -> str:
+        return value.strip()
+
+    @property
+    def resolved(self) -> bool:
+        if self.decision in {
+            AuthorValidationDecision.PROVIDED,
+            AuthorValidationDecision.CORRECTED,
+        }:
+            return bool(self.answer)
+        return self.decision in {
+            AuthorValidationDecision.NOT_AVAILABLE,
+            AuthorValidationDecision.NOT_APPLICABLE,
+        }
+
+
+class AuthorValidationPackage(BaseModel):
+    schema_version: int = 1
+    topic: str
+    paper_type: PaperType
+    instructions: str
+    items: list[AuthorValidationItem] = Field(default_factory=list)
+
+    @property
+    def pending_items(self) -> list[AuthorValidationItem]:
+        return [item for item in self.items if not item.resolved]
 
 
 class PublicationProfile(BaseModel):

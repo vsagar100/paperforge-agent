@@ -9,11 +9,19 @@ from pathlib import Path
 from typing import Any, TypeVar
 from uuid import uuid4
 
+import yaml
 from filelock import FileLock
 from pydantic import BaseModel
 
+from paperforge.author_validation import (
+    VALIDATION_RELATIVE_PATH,
+    dump_author_validation,
+    load_author_validation,
+    validation_user_material_from_payload,
+)
 from paperforge.domain import (
     CURRENT_STATE_SCHEMA,
+    AuthorValidationPackage,
     ClaimLedger,
     EvidenceCoverage,
     EvidenceItem,
@@ -97,6 +105,10 @@ class ProjectStore:
     def evidence_coverage_path(self) -> Path:
         return self.root / "evidence" / "coverage.json"
 
+    @property
+    def author_validation_path(self) -> Path:
+        return self.root / VALIDATION_RELATIVE_PATH
+
     @contextmanager
     def workflow_lock(self, timeout: float = 3.0) -> Iterator[None]:
         (self.root / "audit").mkdir(parents=True, exist_ok=True)
@@ -149,11 +161,12 @@ class ProjectStore:
         if not backup.exists():
             self.write_json(f"audit/state.v{source_schema}.json", payload)
 
-        if source_schema == 3:
+        if source_schema in {3, 4}:
             profile = ResearchProfile.model_validate(payload.get("profile", {}))
             legacy_manuscript = self.read_manuscript() if self.manuscript_path.exists() else ""
             if legacy_manuscript.strip():
-                legacy_path = self.root / "manuscript" / "versions" / "legacy-v1.0.0.md"
+                legacy_version = "v1.0.0" if source_schema == 3 else "v2.0.0"
+                legacy_path = self.root / "manuscript" / "versions" / f"legacy-{legacy_version}.md"
                 if not legacy_path.exists():
                     self.write_text(
                         str(legacy_path.relative_to(self.root)),
@@ -163,9 +176,13 @@ class ProjectStore:
                 project_id=str(payload.get("project_id") or uuid4()),
                 profile=profile,
                 migration_notes=[
-                    "Migrated from the v1 workflow to the publication-contract workflow.",
+                    (
+                        "Migrated from the v1 workflow to the publication-contract workflow."
+                        if source_schema == 3
+                        else "Migrated from PaperForge 2.0 to the research-first validation workflow."
+                    ),
                     "Existing inputs and responses remain authoritative user evidence.",
-                    "The v1 manuscript was preserved and generated stages require a fresh build.",
+                    "The prior manuscript was preserved and generated stages require a fresh build.",
                 ],
                 created_at=payload.get("created_at") or utc_now(),
             )
@@ -335,6 +352,12 @@ class ProjectStore:
     def load_evidence_coverage(self) -> EvidenceCoverage:
         return EvidenceCoverage.model_validate(self.read_json("evidence/coverage.json"))
 
+    def save_author_validation(self, value: AuthorValidationPackage) -> None:
+        self.write_text(VALIDATION_RELATIVE_PATH, dump_author_validation(value))
+
+    def load_author_validation(self) -> AuthorValidationPackage:
+        return load_author_validation(self.author_validation_path)
+
     def read_manuscript(self) -> str:
         if not self.manuscript_path.exists():
             return ""
@@ -361,7 +384,21 @@ class ProjectStore:
             relative = path.relative_to(self.root).as_posix()
             digest.update(relative.encode("utf-8"))
             digest.update(self.checksum(path).encode("ascii"))
+        validation_material = self.author_validation_user_material()
+        if validation_material:
+            digest.update(b"author-validation-user-decisions")
+            digest.update(validation_material.encode("utf-8"))
         return digest.hexdigest()
+
+    def author_validation_user_material(self) -> str:
+        if not self.author_validation_path.exists():
+            return ""
+        try:
+            payload = yaml.safe_load(self.author_validation_path.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            # Invalid author-edited YAML must invalidate the prior run so prepare can report it.
+            return self.checksum(self.author_validation_path)
+        return validation_user_material_from_payload(payload)
 
     def config_fingerprint(self) -> str:
         return self.checksum(self.config_path)

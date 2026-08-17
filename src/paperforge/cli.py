@@ -180,7 +180,7 @@ def run(
         help="Preserve inputs and restart all generated stages.",
     ),
 ) -> None:
-    """Resume until completion or a genuine evidence-integrity blocker."""
+    """Research, draft, review, export, and surface one post-run author validation set."""
     _run_project(ProjectStore(project), provider=provider, force_rebuild=rebuild)
 
 
@@ -211,6 +211,13 @@ def status(project: Path = typer.Argument(..., exists=True, file_okay=False)) ->
         for action in state.author_actions:
             prefix = "BLOCKING" if action.blocking else "Review"
             console.print(f"- {prefix}: {action.action}")
+    if store.author_validation_path.exists():
+        validation = store.load_author_validation()
+        if validation.pending_items:
+            console.print(
+                f"\nAuthor validation: {len(validation.pending_items)} pending item(s) in "
+                f"{store.author_validation_path}"
+            )
 
 
 @app.command()
@@ -348,7 +355,21 @@ def _print_run_report(store: ProjectStore, report: WorkflowReport) -> None:
         if state.submission_ready:
             console.print("[green]Completed: publication submission candidate.[/green]")
         else:
-            console.print("[yellow]Completed: author action remains before submission.[/yellow]")
+            console.print(
+                "[yellow]Completed: manuscript and research package generated; author validation "
+                "remains before submission.[/yellow]"
+            )
+        if store.author_validation_path.exists():
+            validation = store.load_author_validation()
+            if validation.pending_items:
+                console.print(
+                    f"[yellow]Review once:[/yellow] {store.author_validation_path} "
+                    f"({len(validation.pending_items)} pending item(s))."
+                )
+                console.print(
+                    "The draft already uses bounded disclosures; rerun only to incorporate your "
+                    "validated study facts."
+                )
     elif report.records and report.records[-1].status == StageStatus.BLOCKED:
         console.print("[red]Stopped at a genuine evidence-integrity blocker.[/red]")
         for issue in report.records[-1].issues:

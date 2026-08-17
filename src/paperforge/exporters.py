@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from paperforge.author_validation import author_validation_markdown
 from paperforge.citations import build_bibtex, render_numbered_citations
 from paperforge.domain import EvidenceCoverageStatus, IssueDisposition, WorkflowState
 from paperforge.standards import normalize_heading
@@ -66,6 +67,13 @@ class OutputExporter:
                 self.store.root / "outputs" / "submission-checklist.md",
             ]
         )
+
+        if self.store.author_validation_path.exists():
+            self.store.write_text(
+                "outputs/author-validation.md",
+                author_validation_markdown(self.store.load_author_validation()),
+            )
+            report.files.append(self.store.root / "outputs" / "author-validation.md")
 
         try:
             docx = self._export_docx(rendered, profile)
@@ -171,6 +179,9 @@ class OutputExporter:
         except (FileNotFoundError, ValueError):
             profile = None
         unresolved = [action for action in state.author_actions if not action.resolved]
+        pending_validation = []
+        if self.store.author_validation_path.exists():
+            pending_validation = self.store.load_author_validation().pending_items
         lines = [
             "# Submission Checklist",
             "",
@@ -183,6 +194,7 @@ class OutputExporter:
             "- Tables, equations, units, and cross-references checked: pending author confirmation",
             "- Reference metadata and DOI links checked against source records: pending author confirmation",
             "- Similarity/originality check performed by an authorized service: not performed by PaperForge",
+            f"- Consolidated study-fact validation: {len(pending_validation)} pending item(s)",
             "",
             "## Unresolved author actions",
             "",
@@ -280,7 +292,7 @@ class OutputExporter:
             if issue.get("disposition") == IssueDisposition.INTEGRITY_BLOCKER
         ]
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "project_id": state.project_id,
             "paper_type": state.profile.resolved_paper_type,
             "target_journal": state.profile.target_journal,
@@ -308,11 +320,23 @@ class OutputExporter:
             "integrity_blockers": blockers,
             "unresolved_review_items": unresolved,
             "author_actions": [action.model_dump(mode="json") for action in state.author_actions],
+            "author_validation": self._author_validation_payload(),
             "stage_records": records,
             "disclaimer": (
                 "Submission-ready means the implemented evidence and consistency gates passed. "
                 "It does not guarantee journal acceptance and does not replace author verification."
             ),
+        }
+
+    def _author_validation_payload(self) -> dict:
+        if not self.store.author_validation_path.exists():
+            return {"available": False, "items": 0, "pending": 0}
+        package = self.store.load_author_validation()
+        return {
+            "available": True,
+            "items": len(package.items),
+            "pending": len(package.pending_items),
+            "path": "author-actions/validation.yaml",
         }
 
     @staticmethod

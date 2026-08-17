@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import yaml
@@ -19,6 +19,7 @@ PIPELINE_STAGES = (
     "literature",
     "source_appraisal",
     "synthesis",
+    "author_validation",
     "outline",
     "draft",
     "evidence_review",
@@ -29,6 +30,10 @@ PIPELINE_STAGES = (
     "journal_review",
     "final_review",
     "export",
+)
+
+LEGACY_V2_PIPELINE_STAGES = tuple(
+    stage for stage in PIPELINE_STAGES if stage != "author_validation"
 )
 
 LEGACY_V1_PIPELINE_STAGES = (
@@ -94,13 +99,16 @@ class WorkflowConfig(BaseModel):
     resume: bool = True
     invalidate_on_input_change: bool = True
     preserve_legacy_manuscript: bool = True
+    evidence_gap_mode: Literal["research_then_validate", "strict_pre_draft"] = (
+        "research_then_validate"
+    )
 
     @field_validator("stages")
     @classmethod
     def validate_stages(cls, value: list[str]) -> list[str]:
         if value != list(PIPELINE_STAGES):
             raise ValueError(
-                "workflow.stages must use the complete ordered PaperForge 2.0 pipeline"
+                "workflow.stages must use the complete ordered PaperForge 2.1 pipeline"
             )
         return value
 
@@ -179,7 +187,7 @@ class JournalConfig(BaseModel):
     def validate_citation_style(cls, value: str) -> str:
         normalized = value.strip().casefold()
         if normalized != "ieee":
-            raise ValueError("PaperForge 2.0 currently supports citation_style: ieee")
+            raise ValueError("PaperForge 2.1 currently supports citation_style: ieee")
         return normalized
 
 
@@ -190,7 +198,7 @@ class ContextConfig(BaseModel):
 
 
 class AppConfig(BaseModel):
-    schema_version: int = 4
+    schema_version: int = 5
     provider: ProviderConfig = Field(default_factory=ProviderConfig)
     models: dict[str, ModelConfig]
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
@@ -212,7 +220,7 @@ class AppConfig(BaseModel):
 def default_config_data() -> dict[str, Any]:
     model = {"model": "gpt-oss:20b", "temperature": 0.1}
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "provider": ProviderConfig().model_dump(mode="json"),
         "models": {
             "planner": {**model, "temperature": 0.1},
@@ -299,19 +307,49 @@ def _migrate_v3(data: dict[str, Any]) -> dict[str, Any]:
     return migrated
 
 
+def _migrate_v4(data: dict[str, Any]) -> dict[str, Any]:
+    defaults = default_config_data()
+    migrated = {**defaults}
+    for section in (
+        "provider",
+        "models",
+        "workflow",
+        "paper",
+        "literature",
+        "ingestion",
+        "quality",
+        "journal",
+        "context",
+    ):
+        incoming = data.get(section, {})
+        if isinstance(incoming, dict):
+            migrated[section] = {**defaults[section], **incoming}
+    if isinstance(data.get("provider", {}).get("ollama"), dict):
+        migrated["provider"]["ollama"] = {
+            **defaults["provider"]["ollama"],
+            **data["provider"]["ollama"],
+        }
+    if migrated["workflow"].get("stages") == list(LEGACY_V2_PIPELINE_STAGES):
+        migrated["workflow"]["stages"] = list(PIPELINE_STAGES)
+    migrated["workflow"].setdefault("evidence_gap_mode", "research_then_validate")
+    migrated["schema_version"] = 5
+    return migrated
+
+
 def load_config(path: Path, *, persist_migration: bool = True) -> AppConfig:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"Configuration must be a YAML mapping: {path}")
     source_schema = int(raw.get("schema_version", 1))
-    migrated = source_schema < 4
+    migrated = source_schema < 5
     if source_schema < 3:
         data = _migrate_v2(raw)
-        data["schema_version"] = 4
     elif source_schema < 4:
         data = _migrate_v3(raw)
     else:
         data = raw
+    if source_schema < 5:
+        data = _migrate_v4(data)
     if host := os.getenv("OLLAMA_HOST"):
         data.setdefault("provider", {}).setdefault("ollama", {})["host"] = host
     config = AppConfig.model_validate(data)

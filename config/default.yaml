@@ -1,4 +1,4 @@
-schema_version: 4
+schema_version: 5
 
 provider:
   active: ollama
@@ -38,6 +38,7 @@ workflow:
     - literature
     - source_appraisal
     - synthesis
+    - author_validation
     - outline
     - draft
     - evidence_review
@@ -53,6 +54,7 @@ workflow:
   resume: true
   invalidate_on_input_change: true
   preserve_legacy_manuscript: true
+  evidence_gap_mode: research_then_validate
 
 paper:
   requested_type: auto

@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.1.0
+
+Research-first author-validation release.
+
+### Added
+
+- an 18th `author_validation` stage after literature synthesis;
+- one topic-applicable `author-actions/validation.yaml` with known facts, reporting relevance,
+  verified-source context, stable decisions, and a human-readable companion report;
+- ingestion and fingerprinting for resolved author decisions only;
+- `research_then_validate` default and an explicit `strict_pre_draft` compatibility mode;
+- author-validation summary in exported reports and submission checklist;
+- regressions proving the supplied UAV case reaches DOCX export without fabricating flight,
+  annotation, calibration, or uncertainty details.
+
+### Changed
+
+- evidence gaps are author actions instead of integrity blockers in the default workflow;
+- incomplete original studies continue through research, drafting, seven review passes, and export;
+- pending generated validation items do not invalidate or rerun a completed workflow;
+- literature-derived practice is available to the question builder and manuscript discussion but is
+  prohibited from becoming study-specific evidence;
+- original-research section canonicalization prevents simultaneous `Methodology` and
+  `Materials and Methods` sections;
+- configuration and state schemas advance to 5; PaperForge 2.0 artifacts migrate non-destructively.
+
+### Integrity boundary retained
+
+- fabricated/unknown citations, unsupported numbers or declarations, contradictory facts, missing
+  substantive sections, unresolved placeholders, and unsafe/truncated revisions still block.
+
 ## 2.0.0
 
 Publication-contract and evidence-integrity rewrite.
