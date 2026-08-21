@@ -4,6 +4,8 @@ services:
     environment:
       OLLAMA_API_KEY: ${OLLAMA_API_KEY:?Set OLLAMA_API_KEY}
       OLLAMA_HOST: ${OLLAMA_HOST:-https://ollama.com}
+      PAPERFORGE_CONTACT_EMAIL: ${PAPERFORGE_CONTACT_EMAIL:-}
+      OPENALEX_API_KEY: ${OPENALEX_API_KEY:-}
     volumes:
       - ./projects:/projects
     working_dir: /projects

@@ -24,7 +24,7 @@ class ModelRequest:
     system: str
     prompt: str
     response_schema: dict[str, Any] | None = None
-    temperature: float = 0.1
+    temperature: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -40,12 +40,14 @@ class ModelResponse:
 class ModelProvider(ABC):
     @abstractmethod
     def generate(self, request: ModelRequest) -> ModelResponse:
-        """Generate a response using a logical model role."""
+        """Generate one bounded response for a logical model role."""
 
     @abstractmethod
     def healthcheck(self) -> tuple[bool, str]:
         """Return provider availability and a human-readable status."""
 
+    def available_models(self) -> list[str]:
+        return []
+
     def close(self) -> None:
-        """Release provider resources when applicable."""
         return None

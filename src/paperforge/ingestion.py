@@ -8,11 +8,16 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
+
+from paperforge.author_validation import load_author_validation, validation_evidence
 from paperforge.config import IngestionConfig
-from paperforge.domain import EvidenceItem, EvidenceKind
+from paperforge.domain import AuthorValidationDecision, EvidenceItem, EvidenceKind
 from paperforge.storage import ProjectStore
 
 TEXT_EXTENSIONS = {".txt", ".md", ".rst", ".tex", ".bib", ".ris", ".yaml", ".yml"}
+FIGURE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".svg"}
+RESPONSE_FILENAMES = {"responses.yaml", "responses.yml", "respones.yaml", "respones.yml"}
 
 
 @dataclass(slots=True)
@@ -26,7 +31,7 @@ class IngestionReport:
 
 
 class DocumentIngestor:
-    """Extracts local project evidence with stable IDs and checksum provenance."""
+    """Extract user-controlled project files into a provenance-preserving evidence registry."""
 
     def __init__(self, store: ProjectStore, config: IngestionConfig) -> None:
         self.store = store
@@ -34,13 +39,10 @@ class DocumentIngestor:
 
     def refresh(self) -> IngestionReport:
         report = IngestionReport()
-        if not self.config.enabled:
-            return report
-
-        paths = self._discover_files()
+        paths = self.store.input_files()
         report.discovered = len(paths)
         existing = self.store.load_evidence()
-        manual = [item for item in existing if not item.metadata.get("auto_ingested")]
+        generated = [item for item in existing if item.metadata.get("generated")]
         previous = {
             item.source_path: item
             for item in existing
@@ -48,10 +50,12 @@ class DocumentIngestor:
         }
         ingested: list[EvidenceItem] = []
         fingerprint = hashlib.sha256()
+        remaining = self.config.max_total_chars
 
         for path in paths:
             relative = path.relative_to(self.store.root).as_posix()
-            if path.stat().st_size > self.config.max_file_bytes:
+            size = path.stat().st_size
+            if size > self.config.max_file_bytes:
                 report.skipped += 1
                 report.warnings.append(f"Skipped oversized input: {relative}")
                 continue
@@ -61,6 +65,7 @@ class DocumentIngestor:
             old = previous.get(relative)
             if old and old.checksum == checksum:
                 ingested.append(old)
+                remaining -= len(old.content)
                 report.unchanged += 1
                 continue
             try:
@@ -69,22 +74,34 @@ class DocumentIngestor:
                 report.skipped += 1
                 report.warnings.append(f"Could not extract {relative}: {exc}")
                 continue
-            truncated = len(content) > self.config.max_chars_per_document
-            content = content[: self.config.max_chars_per_document]
+            if not content.strip():
+                report.skipped += 1
+                report.warnings.append(f"Skipped empty input: {relative}")
+                continue
+            limit = max(0, min(self.config.max_chars_per_document, remaining))
+            if limit == 0:
+                report.skipped += 1
+                report.warnings.append(
+                    "Evidence context limit reached; remaining files were indexed only."
+                )
+                continue
+            truncated = len(content) > limit
+            content = content[:limit]
+            remaining -= len(content)
             ingested.append(
                 EvidenceItem(
                     id=self._evidence_id(relative),
                     kind=self._kind_for(relative, path.suffix.casefold()),
                     title=path.name,
+                    content=content,
                     source_path=relative,
                     locator=locator,
-                    content=content or f"File supplied: {relative}",
-                    verified=True,
                     checksum=checksum,
+                    verified=True,
                     metadata={
                         "auto_ingested": True,
-                        "verification": "local_checksum_and_locator",
-                        "size_bytes": path.stat().st_size,
+                        "verification": "user_supplied_file_with_sha256",
+                        "size_bytes": size,
                         "extension": path.suffix.casefold(),
                         "truncated": truncated,
                     },
@@ -92,27 +109,38 @@ class DocumentIngestor:
             )
             report.extracted += 1
 
-        self.store.save_evidence(manual + ingested)
+        if self.store.author_validation_path.exists():
+            package = load_author_validation(self.store.author_validation_path)
+            report.discovered += 1
+            validation_item = validation_evidence(package)
+            if validation_item:
+                ingested.append(validation_item)
+                fingerprint.update(validation_item.checksum.encode("ascii"))
+                report.extracted += 1
+            for item in package.items:
+                if item.decision == AuthorValidationDecision.PENDING and item.answer:
+                    report.warnings.append(
+                        f"Ignored {item.id} answer because its decision is still 'pending'."
+                    )
+                if (
+                    item.decision
+                    in {
+                        AuthorValidationDecision.PROVIDED,
+                        AuthorValidationDecision.CORRECTED,
+                    }
+                    and not item.answer
+                ):
+                    report.warnings.append(
+                        f"Ignored {item.id} because decision '{item.decision.value}' requires an answer."
+                    )
+
+        self.store.save_evidence(generated + ingested)
         report.fingerprint = fingerprint.hexdigest()
         return report
 
-    def _discover_files(self) -> list[Path]:
-        paths: list[Path] = []
-        excluded_names = {"responses.yaml"}
-        for folder in self.config.folders:
-            root = self.store.root / folder
-            if not root.exists():
-                continue
-            paths.extend(
-                path
-                for path in root.rglob("*")
-                if path.is_file()
-                and path.name not in excluded_names
-                and not any(part.startswith(".") for part in path.relative_to(root).parts)
-            )
-        return sorted(set(paths), key=lambda path: path.as_posix().casefold())
-
     def _extract(self, path: Path) -> tuple[str, str]:
+        if path.name.casefold() in RESPONSE_FILENAMES:
+            return self._extract_responses(path)
         suffix = path.suffix.casefold()
         extractors: dict[str, Callable[[Path], tuple[str, str]]] = {
             ".json": self._extract_json,
@@ -126,13 +154,35 @@ class DocumentIngestor:
             return path.read_text(encoding="utf-8", errors="replace"), "full file"
         if suffix in extractors:
             return extractors[suffix](path)
-        if suffix in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".svg"}:
+        if suffix in FIGURE_EXTENSIONS:
             return (
-                f"Figure supplied at {path.name}. Pixel/content interpretation is not performed "
-                "automatically; use the caption or accompanying data as scientific evidence.",
+                f"Figure file supplied: {path.name}. The image is registered as an artifact, "
+                "but its pixels are not interpreted as scientific evidence without a caption.",
                 "file metadata",
             )
         raise ValueError(f"unsupported file type '{suffix or '[none]'}'")
+
+    @staticmethod
+    def _extract_responses(path: Path) -> tuple[str, str]:
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            raise ValueError(f"invalid responses YAML: {exc}") from exc
+        answers = payload.get("answers", payload) if isinstance(payload, dict) else {}
+        if not isinstance(answers, dict):
+            raise ValueError("responses.yaml must contain an 'answers' mapping")
+        supplied = [
+            f"{identifier}: {str(answer).strip()}"
+            for identifier, answer in answers.items()
+            if answer is not None and str(answer).strip()
+        ]
+        if not supplied:
+            raise ValueError("responses.yaml contains no non-empty author responses")
+        return (
+            "Author-supplied factual responses from the legacy intake workflow:\n\n"
+            + "\n\n".join(supplied),
+            "all non-empty answers",
+        )
 
     @staticmethod
     def _extract_json(path: Path) -> tuple[str, str]:
@@ -148,9 +198,9 @@ class DocumentIngestor:
             writer = csv.writer(output, delimiter=delimiter, lineterminator="\n")
             for row_number, row in enumerate(reader, start=1):
                 writer.writerow(row)
-                if row_number >= 10_000:
+                if row_number >= 20_000:
                     break
-        return output.getvalue(), "rows 1-10000"
+        return output.getvalue(), "rows 1-20000"
 
     @staticmethod
     def _extract_pdf(path: Path) -> tuple[str, str]:
@@ -185,30 +235,28 @@ class DocumentIngestor:
         except ImportError as exc:
             raise RuntimeError("install PaperForge with [documents] for XLSX extraction") from exc
         workbook = load_workbook(path, read_only=True, data_only=True)
-        chunks: list[str] = []
-        try:
-            for sheet in workbook.worksheets:
-                chunks.append(f"\n--- Sheet: {sheet.title} ---")
-                for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
-                    chunks.append("\t".join("" if value is None else str(value) for value in row))
-                    if row_number >= 10_000:
-                        break
-        finally:
-            workbook.close()
-        return "\n".join(chunks), "workbook values, up to 10000 rows per sheet"
+        output = io.StringIO()
+        writer = csv.writer(output, lineterminator="\n")
+        for sheet in workbook.worksheets:
+            writer.writerow([f"[Sheet: {sheet.title}]"])
+            for row_number, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                writer.writerow(["" if value is None else value for value in row])
+                if row_number >= 20_000:
+                    break
+        workbook.close()
+        return output.getvalue(), "all sheets, rows 1-20000 per sheet"
 
     @staticmethod
     def _evidence_id(relative_path: str) -> str:
-        digest = hashlib.sha256(relative_path.casefold().encode("utf-8"))
-        return f"EV-FILE-{digest.hexdigest()[:12].upper()}"
+        digest = hashlib.sha256(relative_path.casefold().encode("utf-8")).hexdigest()[:12].upper()
+        return f"EV-{digest}"
 
     @staticmethod
     def _kind_for(relative_path: str, suffix: str) -> EvidenceKind:
-        top_level = relative_path.split("/", 1)[0]
-        if top_level == "inputs":
-            return EvidenceKind.USER_STATEMENT
-        if top_level == "data" or suffix in {".csv", ".tsv", ".xlsx"}:
-            return EvidenceKind.EXPERIMENTAL
-        if top_level == "figures":
+        if relative_path.startswith("data/") or suffix in {".csv", ".tsv", ".xlsx"}:
+            return EvidenceKind.EXPERIMENTAL_DATA
+        if relative_path.startswith("figures/") or suffix in FIGURE_EXTENSIONS:
             return EvidenceKind.FIGURE
-        return EvidenceKind.SOURCE
+        if relative_path.startswith("inputs/"):
+            return EvidenceKind.USER_FACT
+        return EvidenceKind.SOURCE_DOCUMENT

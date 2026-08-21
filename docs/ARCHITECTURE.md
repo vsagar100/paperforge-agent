@@ -1,140 +1,205 @@
-# PaperForge 0.2.1 Architecture
+# PaperForge 2.1 Architecture
 
 ## Product boundary
 
-PaperForge assists an author in expressing and validating authentic engineering research. It is
-not an autonomous scientist. It cannot create missing experiments, measurements, ethics approvals,
-novelty, standards, sources, or citations. Its autonomy boundary is based on scientific risk.
+PaperForge is an evidence-constrained authoring system. Language models plan, synthesize, draft,
+review, and propose targeted revisions. Deterministic code owns workflow transitions, evidence and
+claim provenance, reference identity, publication contracts, issue disposition, revision guards,
+readiness, migration, and persistence.
 
-## Component model
+No model response can:
 
-| Component | Responsibility | Must not do |
+- add a source to the verified catalogue;
+- redefine an optional activity as an integrity blocker;
+- mark its own output submission-ready;
+- overwrite a user-controlled input file;
+- introduce or reorder a major manuscript section;
+- replace an unaffected section during revision;
+- bypass citation, numeric-provenance, declaration, structure, or truncation guards.
+
+## State machine
+
+```mermaid
+flowchart TD
+    A["Topic or synopsis"] --> B["Prepare and journal profile"]
+    B --> C["Evidence map and bounded plan"]
+    C --> D["Literature, appraisal, and synthesis"]
+    D --> E["One author-validation set"]
+    E --> F["Outline and evidence-bounded draft"]
+    F --> G["Seven review/revision gates"]
+    G --> H{"Fabrication or structural blocker?"}
+    H -- Yes --> I["Preserve last accepted version"]
+    H -- No --> J["Audited outputs"]
+```
+
+The ordered stages are:
+
+1. `prepare`
+2. `journal_profile`
+3. `evidence_mapping`
+4. `plan`
+5. `literature`
+6. `source_appraisal`
+7. `synthesis`
+8. `author_validation`
+9. `outline`
+10. `draft`
+11. `evidence_review`
+12. `methodology_review`
+13. `results_review`
+14. `discussion_review`
+15. `writing_review`
+16. `journal_review`
+17. `final_review`
+18. `export`
+
+`WorkflowEngine` is the sole transition owner. `StageRunner` implements a stage but cannot skip,
+reorder, or persist its own pass/fail state.
+
+## Component responsibilities
+
+| Component | Owns | Must not own |
 | --- | --- | --- |
-| `ProjectStore` | Atomic state, manuscript versions, locks, migration | Interpret research |
-| `DocumentIngestor` | Extraction, checksums, stable evidence IDs | Claim external scholarly verification |
-| `QuestionManager` | One-round budget, IDs, deduplication, answer ledger | Let a provider control persisted IDs |
-| `StageExecutor` | Typed model contract, context budgets, deterministic checks | Mutate state outside safe-change rules |
-| `WorkflowEngine` | Ordered transitions, bounded retries, recovery, completion | Enter `needs_input` without an open question |
-| `ModelProvider` | Authentication, HTTP behavior, retry policy, model mapping | Leak provider concerns into workflow logic |
-| `OutputExporter` | Markdown, quality JSON, DOCX | Mark unsupported work submission-ready |
+| `ProjectStore` | Atomic writes, locks, migration, versions, fingerprints | Scientific judgment |
+| `DocumentIngestor` | Extraction, checksums, locators, evidence IDs | External claims |
+| `StatisticsDeriver` | Named deterministic calculations | Guessing missing values |
+| Evidence mapper | Claim atoms, requirement coverage, validation candidates | Rewriting author evidence |
+| Author validation builder | Topic relevance, known facts, literature context, stable questions | Treating pending or literature-derived content as study evidence |
+| Standards registry | Checked journal profiles and indexing context | Claiming acceptance |
+| `LiteratureService` | Search, deduplication, DOI verification, ranking | Manuscript findings |
+| `LLMClient` | Structured-output validation and bounded repair | Workflow transitions |
+| `StageRunner` | Planning, synthesis, section drafting, review contracts | Readiness declaration |
+| `IssuePolicy` | Scope-aware disposition | Hiding integrity defects |
+| Validators | Structure, citations, numbers, declarations, depth, revision guards | Creative rewriting |
+| `OutputExporter` | Citation rendering and auditable deliverables | Scientific-content changes |
 
-## State-machine invariants
+## Evidence model
 
-1. `needs_input` implies at least one persisted open question for the same stage.
-2. Only the configured consolidated intake stage may open a question round by default.
-3. Intake can open at most one round and at most the configured total question budget.
-4. Answered or dismissed semantic keys cannot be reopened automatically.
-5. A closed intake round is resumed through a synthetic pass; the intake model is not called again.
-6. Later model question proposals are converted to high-severity author-review findings.
-7. `running` left by an interrupted process is recovered to `pending` before execution.
-8. A passed stage is idempotent and is not rerun on a normal resume.
-9. Retries are bounded and stop early when no safe change was made.
-10. `submission_ready` requires every stage to pass and no unresolved high/blocking finding.
-11. Synchronizing `responses.yaml` cannot replace non-empty user input with an empty state value.
+User-controlled project files are authoritative for study-specific facts. Each extracted record has
+a stable `EV-*` ID, kind, source path, locator, checksum, and bounded content. Original-study records
+are split into exact `CLM-*` atoms; the claim ledger retains the source evidence and numeric atoms.
 
-These invariants directly prevent the former sequence of question batches 1–5, 6–10, 11–18 and
-the deadlock `intake: needs_input` with no question displayed.
+The coverage model distinguishes:
 
-## Interaction lifecycle
+- `draft_blocking`: a defensible original paper cannot be written yet;
+- `submission_blocking`: drafting can proceed only with a transparent unresolved author action;
+- `recommended`: useful strengthening work that is not falsely treated as mandatory.
 
-### First run
+In the default `research_then_validate` mode these levels determine manuscript treatment and final
+readiness, not whether research and drafting may begin. `strict_pre_draft` is an explicit opt-in mode
+for organizations that require the old stop-before-draft policy.
 
-1. Extract changed files and refresh evidence records.
-2. Build a bounded prompt from the profile, evidence, manuscript, prior answers, and journal rules.
-3. Run intake once.
-4. Persist no more than the question budget under PaperForge-assigned IDs.
-5. Write `inputs/responses.yaml` and stop.
+`inputs/responses.yaml` and its compatibility aliases remain read-only author evidence. After
+literature synthesis, the workflow writes one `author-actions/validation.yaml` containing stable
+topic-applicable items, already supplied facts, and the most relevant verified source context. Only
+resolved `decision` and `answer` fields are ingested on a later run. Pending questions and literature
+context never enter the study claim ledger.
 
-### Resume after answers
+Computed evidence is allowed only through named deterministic calculators with explicit inputs and a
+formula version. Confusion-matrix calculations require all four raw counts.
 
-1. Read non-empty values from `responses.yaml` at the start of the next normal run.
-2. Record all supplied answers transactionally in the question ledger.
-3. Preserve partial answers and stop only for the still-empty items.
-4. Close the completed question round and set `intake_closed=true`.
-5. Resume intake through a local synthetic pass.
-6. Continue all remaining stages without another intake call.
+## Publication contract
 
-The explicit `answer` and `answer-all` commands use the same ledger, but are compatibility and
-automation interfaces rather than mandatory interactive steps.
+`journal_profile` resolves a `PublicationProfile` before planning. It specifies checked status,
+article type, main-text and abstract ranges, keyword/reference counts, section order and depth,
+declarations, display-item limits, formatting rules, review dimensions, and source URLs.
 
-### Later missing information
+The built-in DJES profile is marked checked. A generic profile is deliberately unverified and creates
+an author action during journal/final review, preventing a false submission-ready result. Scopus and
+Web of Science/SCIE criteria are retained only as indexing context because they evaluate journals,
+not individual manuscripts.
 
-Later stages receive `questions_allowed=false`. If a provider violates the contract, PaperForge
-does not expose another input round. The proposal becomes an `INPUT-DEFERRED-*` finding in the stage
-review and final quality report. The draft can continue, while submission readiness remains false
-when the unresolved item is serious.
+## Literature and citation trust
 
-## Persistence and migration
+OpenAlex records are accepted only when essential metadata exists and retracted records are removed.
+DOIs can be cross-checked with Crossref. The search manifest records the exact queries, timestamp,
+counts, providers, and warnings; source appraisal records verification, abstract coverage, recency,
+venue diversity, and retractions.
 
-All JSON writes use a temporary sibling followed by atomic replacement. Response-template writes
-also use atomic replacement, merge existing non-empty values, and skip rewriting when no semantic
-change is needed. A cross-platform file lock prevents two `run` or answer operations from updating
-one project simultaneously.
+Models see only canonical reference IDs and must cite them as `[@REF001]`. Export assigns numbers by
+first appearance and builds the bibliography deterministically. Numeric prose linked to a citation is
+accepted only when the exact numeric atom occurs in that selected source's available record.
 
-Schema-1 state is upgraded on load:
+## Outline and drafting contract
 
-- legacy IDs such as `Q6` become `Q-006`;
-- semantic keys and statuses are derived;
-- existing answers are preserved;
-- legacy questions are represented as one intake round;
-- an answered `needs_input` deadlock becomes `pending` with `intake_closed=true`;
-- excess unanswered legacy questions are dismissed above the configured budget.
+The journal profile supplies the authoritative major-section order. Model-proposed duplicates or
+extras are discarded. Every retained section receives:
 
-The original state remains recoverable from the user's normal project backup. Migration does not
-reinitialize or delete the project.
+- content requirements and target depth;
+- allowed claim IDs and evidence IDs;
+- allowed verified reference IDs;
+- supported or author-required table/figure plans.
 
-## Evidence ingestion
+Draft calls return `DraftBatch` objects. Each requested heading must appear exactly once and in order;
+bodies may contain level-3 subsections and Markdown tables but no level-1/2 headings. Every batch is
+checked before assembly, preventing the duplicate-section and raw-boundary failures seen in v1.
 
-Evidence IDs are derived from normalized relative paths, so an edited file retains its identity.
-SHA-256 detects content changes. Extraction supports text/Markdown/BibTeX/RIS, JSON, CSV/TSV, PDF,
-DOCX, and XLSX. Images are registered with checksum and provenance but are not interpreted as data.
+## Review and targeted revision
 
-`verified=true` for auto-ingested evidence means local checksum and locator integrity, not peer-
-review validation. External DOI metadata, retraction checks, and licensed full-text scholarly search
-remain separate future provider boundaries.
+Each review stage runs deterministic checks, obtains a structured specialist review, normalizes issue
+scope, and revises only safely fixable sections. A revision response must contain exactly the named
+replacement sections. PaperForge then checks provenance, citations, numeric atoms, headings,
+duplicates, and document preservation before replacing `manuscript/current.md`.
 
-## Model contract
+```mermaid
+flowchart TD
+    A["Current manuscript"] --> B["Deterministic and model review"]
+    B --> C{"Safe text-only fix?"}
+    C -- No --> D["Author action or recommendation"]
+    C -- Yes --> E["Exact replacement sections"]
+    E --> F{"Section and revision guards pass?"}
+    F -- No --> G["Preserve prior manuscript"]
+    F -- Yes --> A
+```
 
-The application requests a typed `LLMStagePayload` containing:
+The seven review roles cover evidence, methodology, results, discussion, writing, journal rules, and
+an independent final audit. Model scores are diagnostic; deterministic unresolved issues determine
+the quality score and readiness.
 
-- score and findings;
-- optional intake question proposals with semantic keys;
-- exact manuscript patches;
-- a full replacement document only for an empty initial draft;
-- evidence-supported profile updates;
-- audit notes.
+### Integrity blockers
 
-Unstructured output receives a bounded schema-repair attempt. Model-generated question IDs are not
-accepted. Context includes answered questions and explicit interaction policy on every stage.
+- fabricated, unknown, unverified, or malformed citation;
+- unsupported study/result number or contradictory fact;
+- unsupported funding, conflict, authorship, AI-use, permission, or availability assertion;
+- missing, empty, shallow, duplicate, or injected required section;
+- unresolved internal marker or placeholder;
+- unsafe or truncated revision.
 
-## Safe mutation
+### Author actions
 
-PaperForge applies a manuscript change only when:
+Missing evidence that cannot be repaired through wording remains explicit and unresolved. Examples
+include calibration, raw outcomes/uncertainty, repository availability, declarations, permissions,
+or an unchecked target-journal contract.
 
-- it is the initial full document on a blank manuscript; or
-- an exact `before` string occurs once; and
-- every referenced evidence ID exists; and
-- the patch is not a scientific change under the default human-review policy.
+### Recommendations
 
-All applied manuscript changes create immutable numbered versions. Unsupported or ambiguous patches
-remain in stage reviews.
+External baselines, simulation, and regulatory analysis remain recommendations unless the declared
+scope or publication contract explicitly requires them. Transparent absence does not become a claim
+that the activity occurred.
 
-## Provider reliability
+## Resumption, invalidation, and migration
 
-Ollama transport handles Cloud and intentionally local endpoints. Authentication is required only
-for the Cloud hostname. HTTP 401, 403, and 404 are non-retryable and report the server's safe error
-detail. Rate limits, timeouts, connection failures, and selected server errors use bounded backoff.
-Model discovery and inference entitlement are reported as distinct facts.
+State schema 5 is stored in `audit/state.json`. The input fingerprint covers profile fields,
+configuration, and user-controlled content in `inputs/`, `sources/`, `data/`, and `figures/`; generated
+outputs do not affect it. For `author-actions/validation.yaml`, only author-edited decisions and
+answers affect the fingerprint, so generation of a pending validation set does not cause a spurious
+rebuild. An input/configuration change versions the current manuscript and resets generated state. A
+normal rerun resumes completed stages without repeated provider calls.
 
-## Current limitations
+Schema-4 (PaperForge 2.0) migration preserves `state.v4.json`, `paperforge.v4.yaml`, and
+`legacy-v2.0.0.md`. Schema-3 (PaperForge 1.0) migration preserves `state.v3.json`, `paperforge.v3.yaml`, and
+`legacy-v1.0.0.md`. Older v0.2 projects retain their v2 backups and `legacy-v0.2.1.md`. In every case,
+the schema-5 workflow rebuilds generated artifacts from untouched author inputs.
 
-- Citation metadata/DOI verification and retraction checks are not yet externally automated.
-- PDF extraction is text-layer based; scanned documents need a future OCR adapter.
-- Figure pixels are not interpreted automatically.
-- The DOCX exporter is a clean generic research format, not a journal-specific template engine.
-- Similarity scoring requires an authorized external service; PaperForge performs qualitative
-  originality review only.
-- Deterministic statistical calculators are still metric-family extensions rather than a universal
-  equation engine.
+## Failure and privacy semantics
 
-These limitations produce explicit findings or author actions; they do not justify fabricated text.
+- Provider, schema, filesystem, and literature failures are explicit and resumable.
+- Authentication/authorization/not-found HTTP failures are not retried; transient limits and network
+  errors use bounded retries.
+- Evidence gaps continue into bounded drafting by default; only explicit `strict_pre_draft` mode
+  blocks at evidence mapping.
+- A later integrity block preserves and exports the last accepted manuscript plus its audit report.
+- Only `passed` and `passed_with_actions` stages advance.
+- Project evidence is sent to the configured model provider. Search queries and bibliographic IDs are
+  sent to OpenAlex/Crossref. Credentials are read from environment variables and never written into
+  project artifacts.
