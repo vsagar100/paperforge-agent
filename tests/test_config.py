@@ -1,78 +1,52 @@
-from pathlib import Path
-
 import pytest
-import yaml
 from pydantic import ValidationError
 
-from paperforge.config import PIPELINE_STAGES, JournalConfig, load_config
+from paperforge.config import Model, Settings, load_settings, write_settings
 
 
-def test_default_configuration_has_complete_v21_pipeline(default_config_path: Path) -> None:
-    config = load_config(default_config_path, persist_migration=False)
-    assert config.schema_version == 5
-    assert config.workflow.stages == list(PIPELINE_STAGES)
-    assert set(config.models) == {
-        "planner",
-        "drafter",
-        "reviewer",
-        "reviser",
-        "final_auditor",
-    }
-    assert config.paper.topic_only_default.value == "review_article"
+def test_defaults_are_resolved_and_roundtrip(tmp_path):
+    config = Settings()
+    assert config.models["local"].billing == "free"
+    assert config.models["local"].requested_id == "gpt-oss:20b"
+    assert config.budget_inr == 500
+    path = tmp_path / "config.yaml"
+    write_settings(path, config)
+    assert load_settings(path) == config
 
 
-def test_v2_configuration_is_backed_up_and_migrated(tmp_path: Path) -> None:
-    path = tmp_path / "paperforge.yaml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": 2,
-                "provider": {
-                    "active": "ollama",
-                    "ollama": {
-                        "host": "https://ollama.com",
-                        "api_key_env": "OLLAMA_API_KEY",
-                        "structured_outputs": False,
-                    },
-                },
-                "models": {
-                    "drafting": {"model": "draft-model", "temperature": 0.2},
-                    "enhancement": {"model": "revise-model", "temperature": 0.1},
-                    "scientific_review": {"model": "review-model", "temperature": 0.0},
-                    "final_audit": {"model": "audit-model", "temperature": 0.0},
-                },
-                "journal": {"abstract_max_words": 230, "citation_style": "ieee"},
-            }
-        ),
-        encoding="utf-8",
-    )
-    config = load_config(path)
-    assert (tmp_path / "paperforge.v2.yaml").exists()
-    assert yaml.safe_load(path.read_text(encoding="utf-8"))["schema_version"] == 5
-    assert config.models["planner"].model == "draft-model"
-    assert config.models["reviser"].model == "revise-model"
-    assert config.models["reviewer"].model == "review-model"
-    assert config.journal.abstract_max_words == 230
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"provider": "bad"},
+        {"provider": "openai"},
+        {"provider": "compatible", "model": "model-v1", "base_url": "http://example.com"},
+        {"provider": "ollama", "base_url": "https://key:secret@example.com"},
+        {"provider": "gemini", "billing": "paid"},
+        {
+            "provider": "gemini",
+            "billing": "paid",
+            "input_inr_per_million": float("nan"),
+            "output_inr_per_million": 1,
+        },
+    ],
+)
+def test_invalid_or_unpriced_routes_are_rejected(kwargs):
+    with pytest.raises(ValidationError):
+        Model(**kwargs)
 
 
-def test_v2_configuration_gains_research_first_validation_stage(tmp_path: Path) -> None:
-    path = tmp_path / "paperforge.yaml"
-    payload = yaml.safe_load(
-        (Path(__file__).parents[1] / "config" / "default.yaml").read_text(encoding="utf-8")
-    )
-    payload["schema_version"] = 4
-    payload["workflow"]["stages"].remove("author_validation")
-    payload["workflow"].pop("evidence_gap_mode")
-    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
-
-    config = load_config(path)
-
-    assert config.schema_version == 5
-    assert config.workflow.stages == list(PIPELINE_STAGES)
-    assert config.workflow.evidence_gap_mode == "research_then_validate"
-    assert (tmp_path / "paperforge.v4.yaml").exists()
+def test_cloud_is_not_assumed_free_and_versions_are_exact():
+    assert Model(provider="ollama", base_url="https://ollama.com").billing == "unknown"
+    model = Model(provider="gemini", version="exact-provider-snapshot")
+    assert model.requested_id == "exact-provider-snapshot"
 
 
-def test_unsupported_citation_style_is_rejected_explicitly() -> None:
-    with pytest.raises(ValidationError, match="currently supports citation_style: ieee"):
-        JournalConfig(citation_style="apa")
+def test_stage_override_precedes_role_and_default():
+    settings = Settings(stage_routes={"draft": ["local"]}, role_routes={"writer": ["local"]})
+    assert settings.routes("draft", "writer") == ["local"]
+    with pytest.raises(ValidationError):
+        Settings(default_routes=["typo"])
+    with pytest.raises(ValidationError):
+        Settings(stage_routes={"invented": ["local"]})
+    with pytest.raises(ValidationError):
+        Settings(abstract_min_words=300, abstract_max_words=200)

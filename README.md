@@ -1,286 +1,124 @@
-# PaperForge Agent 2.1
+# PaperForge Agent 3
 
-PaperForge turns one topic or synopsis into an evidence-constrained manuscript through a resumable,
-multi-stage publication workflow. It searches and appraises literature, drafts exact journal
-sections, reviews them from several scientific perspectives, and applies only validated targeted
-revisions.
+A fresh Python implementation of a staged, resumable manuscript workflow. It develops a
+topic, accessible literature and optional author evidence into a manuscript review packet.
+Accepted writing survives failures, and author decisions explicitly continue the workflow.
+The [supplied manuscript prompt](docs/MANUSCRIPT_REQUIREMENTS.md) is retained for reference.
+The earlier implementation is replaced; old projects are not migrated automatically.
 
-PaperForge does not guarantee acceptance, replace missing experiments, certify originality, or
-turn an indexing label into a manuscript standard. It must not invent data, methods, citations,
-equipment, parameters, approvals, declarations, or results.
+## Install and start
 
-## Install and run
+Python 3.11+:
 
-From the repository root on Windows PowerShell:
+~~~bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[documents,scientific]'
+ollama pull gpt-oss:20b
+# Start Ollama separately at http://localhost:11434.
+paperforge init projects/thermal --topic "Robust thermal monitoring of electrical equipment"
+paperforge doctor projects/thermal
+paperforge run projects/thermal --until plan
+paperforge status projects/thermal
+paperforge resume projects/thermal
+~~~
 
-```powershell
-py -3.12 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -e ".[documents]"
-```
+Use python -m paperforge if the executable is not on PATH. Ollama is external: the app does
+not install/start it or download models. Choose a smaller local model for limited hardware.
+There is no claim that one model is universally best.
 
-Copy `.env.example` to `.env` and set the configured Ollama credential:
+Defaults: local inference, free_first, ₹500 cap, five accessible sources minimum,
+35 discovery candidates, five-year recency window and two automatic review revisions.
+Five distinct supporting citations are required. Discovery targets are not a guarantee of
+relevance or citation count. QC flags a recent-citation fraction below the prompt's 70–80% target.
 
-```dotenv
-OLLAMA_API_KEY=your_key_only
-PAPERFORGE_CONTACT_EMAIL=you@example.com
-```
+## Provider, model and cost choices
 
-Start from a topic:
+Adapters support Ollama, Gemini, Anthropic, OpenAI, Groq, OpenRouter, DeepSeek, Mistral
+and custom compatible HTTPS endpoints. [Configuration details](docs/MODELS.md).
 
-```powershell
-paperforge write "Thermal UAV fire detection using edge-cloud intelligence" `
-  --project projects\uav-fire-paper
-```
+~~~bash
+# Confirm hosted account free entitlement before choosing billing free.
+paperforge model projects/thermal google gemini --billing free --select
+paperforge policy projects/thermal --mode free_only --budget-inr 0
+paperforge route projects/thermal local google --role writer
+paperforge route projects/thermal google local --stage review
+~~~
 
-Or supply a complete synopsis and target journal:
+Put keys in projects/thermal/.env or exported variables. Keys never enter YAML/call records.
+Provider and complete native model/snapshot IDs can change globally, by role or by stage.
+Fallback uses only listed routes. Hosted unknown billing routes are excluded; paid routes
+require current INR-per-million input/output ceiling rates. Changing routes/budget preserves
+accepted work; paperforge retry projects/thermal draft deliberately regenerates writing.
 
-```powershell
-paperforge write --from-file synopsis.md `
-  --project projects\uav-fire-paper `
-  --journal "DJES"
-```
+## Inputs and topic-only work
 
-Subsequent runs resume completed stages:
+~~~bash
+paperforge attach projects/thermal notes.txt --role author_note
+paperforge attach projects/thermal measurements.xlsx --role dataset
+paperforge attach projects/thermal paper.pdf --role source
+paperforge attach projects/thermal diagram.cdr --role figure
+~~~
 
-```powershell
-paperforge run projects\uav-fire-paper
-```
+Text, CSV, JSON, XLSX, text PDFs, DOCX, PPTX, images, SVG and numeric MAT/NPY have adapters.
+Hashes, locations and omissions are recorded. Images yield metadata and optional OCR,
+not scientific visual interpretation. Native CDR, Simulink, MATLAB live scripts/FIG, DWG and
+legacy Office inputs are retained with explicit conversion requests. See [file handling](docs/INPUTS.md).
 
-## What happens with limited input
+Topic-only projects search scholarly metadata/abstracts, plan the research and discover
+candidate datasets where appropriate. auto selects review without empirical inputs.
+Initialize with --paper-type original_research to preserve that structure with missing-result
+placeholders. The app does not automatically validate/download datasets, train arbitrary
+models, run MATLAB/CorelDRAW, execute uploaded code or perform physical experiments.
+Only documented built-in analysis runs on genuine author-supplied observations.
 
-`--paper-type auto` is the default.
+## Recovery and author continuation
 
-- A topic without authentic study methods and results becomes a review article.
-- A synopsis or project evidence containing original methods and results becomes an original
-  research candidate.
-- An incomplete original study does **not** stop the default workflow. PaperForge maps the gaps,
-  researches relevant reporting practice, drafts only what the evidence supports, discloses what is
-  not documented, and completes the review/export package.
-- After literature synthesis, PaperForge writes one topic-specific
-  `author-actions/validation.yaml`. The author reviews it once after the run; pending entries are
-  never treated as evidence and never trigger a rebuild by themselves.
-- An unsupported request for `original_research` falls back to a review article by default instead
-  of manufacturing an experiment.
+~~~bash
+# Correct network/credentials/configuration/disk issues, then:
+paperforge resume projects/thermal
+paperforge decide projects/thermal continue --note "Use the attached protocol." --continue-run
+paperforge decide projects/thermal revise --stage draft --note "Correct the research scope."
+paperforge resume projects/thermal
+paperforge decide projects/thermal defer
+paperforge decide projects/thermal continue --continue-run
+paperforge decide projects/thermal cancel
+~~~
 
-Existing author facts may still be saved once under `answers:` in `inputs/responses.yaml`. The aliases
-`responses.yml`, `respones.yaml`, and `respones.yml` are also imported for compatibility, but
-`responses.yaml` is recommended.
+Failed stages retry on run/resume. Completed stages and accepted sections survive.
+continue/revise invalidates selected dependents and preserves audit history.
+Approval cannot bypass evidence checks. Changed input bytes trigger dependent revalidation.
+Cancelled projects cannot resume. See [architecture and recovery](docs/ARCHITECTURE.md).
 
-For the post-run validation file, change only `decision` and `answer`. Use `provided` or `corrected`
-with the authentic study fact, `not_available` when the record does not exist, or `not_applicable`
-with a short explanation. Rerun only when those decisions should be incorporated. Literature-linked
-guidance in that file is context for reporting; it is never evidence that the experiment used a
-particular procedure.
+## Outputs and limits
 
-For an original engineering experiment, the evidence map and validation set check at least:
+The project's outputs contains manuscript.md, optional manuscript.docx, source/claim registers,
+literature matrix, computed-results CSV, proposed SVG diagrams and quality-control.json.
+audit retains prior versions. Blocked drafts export accepted portions and outstanding actions.
 
-- system/material specifications and the configuration actually tested;
-- exact algorithm and decision parameters;
-- acquisition design, independent runs/sites, and leakage controls;
-- ground-truth definitions, annotators, and adjudication;
-- evaluation independence and parameter-selection procedure;
-- raw outcomes, denominators, and uncertainty support;
-- calibration or measurement-validity procedures when relevant;
-- primary results and their exact evaluation boundary.
+IEEE-style references are assembled in first-appearance order from retrieved bibliographic
+metadata. Exact support excerpts and paragraph provenance remain in separate registers.
+Source existence and quote matching do not prove entailment; model review and author
+verification are required. Every packet has submission_ready=false.
 
-Submission declarations, repository availability, permissions, and recommended comparisons are
-tracked separately. PaperForge never fills them by assumption.
+DOCX body text uses Times New Roman 12 pt. Tables/diagrams are separate assets for author
+integration; complex equation typesetting, journal templates, visual review and final table/
+figure numbering are not certified. This is an author-review packet, not automatic journal submission.
 
-The legacy blocking behavior remains available for teams that explicitly require it:
+## Developer checks
 
-```yaml
-workflow:
-  evidence_gap_mode: strict_pre_draft
-```
-
-## Publication workflow
-
-| Stage | Contract |
-| --- | --- |
-| Prepare | Extract files, preserve provenance, and derive only supported statistics |
-| Journal profile | Resolve article type and a checked publication contract |
-| Evidence mapping | Build an exact claim ledger and classify unsupported study details without stopping the default run |
-| Plan | Define the question, objectives, scope, contribution, and search strategy |
-| Literature | Search OpenAlex, deduplicate records, and verify DOI metadata where possible |
-| Source appraisal | Record verification, abstract coverage, recency, diversity, and retractions |
-| Synthesis | Build source-level notes, themes, gap, and bounded novelty position |
-| Author validation | Collate one topic-applicable, research-linked author check while keeping pending content out of evidence |
-| Outline | Lock one ordered section set with evidence, claim, reference, and display-item links |
-| Draft | Generate schema-validated sections in bounded batches |
-| Evidence review | Check citations, numeric provenance, literature grounding, and source coverage |
-| Methodology review | Check reproducibility, validity boundaries, and honest disclosure |
-| Results review | Check dataset accounting, denominators, uncertainty, tables, and consistency |
-| Discussion review | Check interpretation, comparison, generalisability, limitations, and implications |
-| Writing review | Check depth, cohesion, terminology, structure, and internal markers |
-| Journal review | Check the active profile, abstract, keywords, declarations, and format contract |
-| Final review | Re-run deterministic gates plus an independent scope-aware audit |
-| Export | Produce the manuscript and complete audit/submission package |
-
-Drafting and revision use structured section objects. PaperForge owns the title and level-2 heading
-assembly, so a model cannot inject duplicate major sections or a second manuscript. Revision is
-targeted: only named sections may be returned, all unaffected sections remain byte-for-byte
-unchanged, and an unsafe revision is rejected without replacing the prior version.
-
-## Publication standards and indexing claims
-
-Scopus and Web of Science/SCIE evaluate journals and editorial practice; neither is a universal
-manuscript-acceptance checklist. PaperForge therefore applies:
-
-1. current, journal-specific author instructions when a supported profile exists;
-2. reproducibility and research-integrity gates;
-3. peer-review dimensions such as contribution, literature coverage, method soundness, results,
-   discussion, clarity, references, and declarations.
-
-Version 2.1 contains a checked DJES research/review profile. An unknown journal uses a conservative
-engineering profile and remains `author_action_required` until its live instructions and submission
-files are verified. See [Publication Standard](docs/PUBLICATION_STANDARD.md) for the official
-sources, checked rules, and the comparable UAV/thermal-paper benchmark used in the redesign.
-
-## Evidence and provenance
-
-PaperForge scans these folders on each non-resumed build:
-
-| Folder | Formats |
-| --- | --- |
-| `inputs/` | Markdown, text, YAML, and saved response YAML |
-| `sources/` | PDF, DOCX, TXT, Markdown, BibTeX, RIS, and JSON |
-| `data/` | CSV, TSV, XLSX, JSON, and experiment notes |
-| `figures/` | PNG, JPEG, TIFF, SVG, and captions |
-
-Each extracted item receives a stable evidence ID, checksum, source path, and locator. Original-study
-statements are split into stable claim atoms used to constrain section drafting. Images are
-registered, but their pixels are not interpreted automatically.
-
-When authentic TP, TN, FP, and FN counts are present, PaperForge deterministically derives accuracy,
-precision, recall, specificity, F1, FPR, FNR, MCC, and Wilson confidence intervals. It does not
-derive those values from percentages or incomplete counts.
-
-## Literature and citations
-
-PaperForge uses the [OpenAlex Works API](https://developers.openalex.org/api-reference/works) for
-scholarly discovery and the [Crossref REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/)
-for optional DOI metadata checks. Queries and bibliographic identifiers are sent to those services;
-project evidence is sent only to the configured language-model provider.
-
-Models may cite only catalogue IDs such as `[@REF001]`. Unambiguous comma-separated model output is
-normalized, but descriptive or malformed markers remain a hard defect. Export numbers citations by
-first appearance and builds both the reference list and `references.bib`. A numeric claim from a
-cited paper is allowed only when that exact number occurs in the cited record's available title,
-metadata, or abstract; a citation cannot legitimize an invented study result.
-
-## Outputs
-
-```text
-project/
-├── author-actions/
-│   ├── validation.yaml
-│   └── validation.md
-├── evidence/
-│   ├── registry.json
-│   ├── claim-ledger.json
-│   └── coverage.json
-├── literature/
-│   ├── references.json
-│   ├── search-manifest.json
-│   ├── source-appraisal.json
-│   └── synthesis.json
-├── planning/
-│   ├── publication-profile.json
-│   ├── research-plan.json
-│   └── outline.json
-├── manuscript/
-│   ├── current.md
-│   └── versions/
-├── reviews/
-├── audit/state.json
-└── outputs/
-    ├── manuscript.md
-    ├── manuscript.docx
-    ├── references.bib
-    ├── literature-matrix.csv
-    ├── publication-profile.md
-    ├── evidence-coverage.md
-    ├── author-validation.md
-    ├── display-item-plan.md
-    ├── submission-checklist.md
-    ├── quality-report.json
-    ├── review-report.md
-    └── revision-history.md
-```
-
-The DOCX export uses A4 pages, numbered sections when required, editable tables, and literal
-hanging-indent references so bibliography numbering always restarts at 1. Figure source files,
-title-page metadata, authorship, permissions, declarations, and the journal's current template still
-require author confirmation.
-
-`submission_ready=true` means the implemented evidence, citation, publication-contract, structure,
-and consistency gates passed. It is a submission candidate—not a guarantee of peer-review outcome.
-
-## Ollama Cloud or local Ollama
-
-The default endpoint is Ollama Cloud:
-
-```yaml
-provider:
-  active: ollama
-  ollama:
-    host: https://ollama.com
-```
-
-Use local Ollama only by deliberately changing the host to `http://localhost:11434`. Cloud responses
-use schema-grounded prompts plus Pydantic validation and bounded repair attempts. Local Ollama may
-enable native structured output with `structured_outputs: true`.
-
-Check connectivity and actual inference entitlement:
-
-```powershell
-paperforge doctor projects\uav-fire-paper
-paperforge doctor projects\uav-fire-paper --inference
-```
-
-## Upgrade an existing project
-
-```powershell
-git pull
-python -m pip install -e ".[documents]"
-paperforge --version
-paperforge run projects\uav-fire-paper --rebuild
-```
-
-Expected version:
-
-```text
-PaperForge 2.1.0
-```
-
-Migration is non-destructive: legacy configuration/state files and the prior generated manuscript
-are preserved, while user inputs and response YAML remain untouched. See
-[Migration](docs/MIGRATION.md) for exact backup names and behavior.
-
-## Operational commands
-
-```powershell
-paperforge status projects\uav-fire-paper
-paperforge validate projects\uav-fire-paper
-paperforge export projects\uav-fire-paper
-paperforge run projects\uav-fire-paper --rebuild
-```
-
-## Development
-
-```powershell
-python -m pip install -e ".[dev,documents]"
+~~~bash
+python -m pip install -e '.[dev,documents,scientific]'
 python -m ruff check .
 python -m ruff format --check .
-python -m pytest
+python -m pytest --cov=paperforge --cov-report=term-missing
 python -m build
-```
+~~~
 
-The regression suite includes the supplied five-answer UAV case continuing through export with one
-post-run validation set, pending-validation idempotency, validated-answer ingestion, malformed citation variants,
-fabricated declarations, duplicate sections, unsupported numeric claims, section injection,
-revision preservation, migration, export numbering, and strict-mode compatibility.
+Tests use deterministic fixtures, mocked HTTP and injected failures. They do not certify
+live provider availability or manuscript quality. Store, Settings and Workflow are usable
+Python interfaces; this release offers a CLI, not a hosted web UI.
 
-See [Architecture](docs/ARCHITECTURE.md) for the state machine and trust boundaries.
+Docker: docker compose run --rm paperforge --help. Projects mount under /projects.
+Give the container user write access to the host directory. localhost inside Docker refers
+to that container; configure an accessible endpoint or shared network namespace for Ollama.

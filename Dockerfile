@@ -10,7 +10,7 @@ WORKDIR /app
 COPY pyproject.toml README.md LICENSE ./
 COPY config ./config
 COPY src ./src
-RUN pip install ".[documents]"
+RUN pip install ".[documents,scientific]"
 
 USER paperforge
 ENTRYPOINT ["paperforge"]

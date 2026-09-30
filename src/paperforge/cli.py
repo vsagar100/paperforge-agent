@@ -1,416 +1,282 @@
 from __future__ import annotations
 
-import re
-from importlib.resources import as_file, files
+import json
+import shutil
 from pathlib import Path
 
 import typer
-from dotenv import find_dotenv, load_dotenv
-from filelock import Timeout as FileLockTimeout
-from rich.console import Console
-from rich.table import Table
+from dotenv import load_dotenv
 
 from paperforge import __version__
-from paperforge.config import AppConfig, load_config
-from paperforge.domain import IssueDisposition, PaperType, ResearchProfile, StageStatus
-from paperforge.exporters import OutputExporter
-from paperforge.literature import LiteratureError, LiteratureService
-from paperforge.llm import LLMClient
-from paperforge.providers import MockProvider, OllamaProvider, ProviderError
-from paperforge.providers.base import ModelProvider, ModelRequest
-from paperforge.stages import StageRunner
-from paperforge.storage import ProjectStore
-from paperforge.validators import ValidationContext, validate_manuscript
-from paperforge.workflow import WorkflowEngine, WorkflowReport
-
-dotenv_path = find_dotenv(usecwd=True)
-if dotenv_path:
-    load_dotenv(dotenv_path)
+from paperforge.config import Model, Settings, load_settings, write_settings
+from paperforge.schemas import Decision, Project
+from paperforge.store import STAGES, Store
+from paperforge.workflow import Workflow
 
 app = typer.Typer(
-    help="Evidence-grounded, publication-oriented research paper workflow.",
-    no_args_is_help=True,
+    help="Evidence-first manuscript workflow with durable stages.", no_args_is_help=True
 )
-console = Console()
 
 
-def _default_config() -> Path:
-    packaged = files("paperforge").joinpath("default.yaml")
-    if packaged.is_file():
-        with as_file(packaged) as path:
-            return Path(path)
-    return Path(__file__).resolve().parents[2] / "config" / "default.yaml"
+def output(value):
+    typer.echo(json.dumps(value, indent=2, ensure_ascii=False))
 
 
-def _provider(config: AppConfig, selected: str | None = None) -> ModelProvider:
-    name = selected or config.provider.active
-    if name == "mock":
-        return MockProvider()
-    if name == "ollama":
-        return OllamaProvider(config)
-    raise ValueError("Provider must be 'ollama' or 'mock'.")
-
-
-def _engine(
-    store: ProjectStore,
-    config: AppConfig,
-    provider: ModelProvider,
-) -> tuple[WorkflowEngine, LiteratureService]:
-    literature = LiteratureService(config.literature)
-    runner = StageRunner(store, config, LLMClient(config, provider), literature)
-    return WorkflowEngine(store, config, runner), literature
-
-
-@app.callback()
-def main(
-    version: bool = typer.Option(
-        False,
-        "--version",
-        help="Show the installed version and exit.",
-        is_eager=True,
-        callback=lambda value: _show_version(value),
-    ),
-) -> None:
-    del version
+def existing(path: Path) -> Store:
+    store = Store(path)
+    if not store.db_path.exists():
+        raise typer.BadParameter(
+            "Not a v3 project. Initialize a new directory; v2 projects remain untouched."
+        )
+    load_dotenv(store.root / ".env", override=False)
+    return store
 
 
 @app.command()
-def write(
-    research_input: str | None = typer.Argument(
-        None,
-        help="Research topic or complete synopsis. Omit to enter it once at the prompt.",
-    ),
-    project: Path | None = typer.Option(
-        None,
-        "--project",
-        "-p",
-        help="Project directory; defaults to projects/<topic-slug>.",
-    ),
-    from_file: Path | None = typer.Option(
-        None,
-        "--from-file",
-        exists=True,
-        dir_okay=False,
-        help="Read a synopsis from a UTF-8 text/Markdown file.",
-    ),
-    domain: str = typer.Option("engineering", help="Research discipline."),
-    journal: str | None = typer.Option(None, help="Target journal, if known."),
-    paper_type: PaperType = typer.Option(
-        PaperType.AUTO, help="auto, original_research, or review_article"
-    ),
-    provider: str | None = typer.Option(None, help="Override provider: ollama or mock."),
-) -> None:
-    """Create and run a paper from one topic or synopsis input."""
-    if research_input and from_file:
-        _fail("Provide either the positional research input or --from-file, not both.")
-    text = (
-        from_file.read_text(encoding="utf-8").strip()
-        if from_file
-        else (research_input or typer.prompt("Research topic or synopsis")).strip()
-    )
-    if len(text) < 8:
-        _fail("Research input must contain at least eight characters.")
-    topic, synopsis = _split_topic_and_synopsis(text)
-    root = project or Path("projects") / _slug(topic)
-    store = ProjectStore(root)
-    if store.state_path.exists():
-        _fail(
-            f"Project already exists: {store.root}. Use 'paperforge run' to resume it or choose "
-            "a different --project path."
-        )
-    try:
-        store.initialize(
-            ResearchProfile(
-                topic=topic,
-                synopsis=synopsis,
-                domain=domain,
-                requested_paper_type=paper_type,
-                target_journal=journal,
-            ),
-            _default_config(),
-        )
-    except (FileExistsError, OSError, ValueError) as exc:
-        _fail(str(exc))
-    console.print(f"[green]Created[/green] {store.root}")
-    _run_project(store, provider=provider, force_rebuild=False)
+def version():
+    """Show application version."""
+    typer.echo(__version__)
 
 
 @app.command()
 def init(
-    project: Path = typer.Argument(..., help="New project directory."),
-    topic: str = typer.Option(..., prompt=True, help="Research topic."),
-    synopsis_file: Path | None = typer.Option(
-        None,
-        "--synopsis-file",
-        exists=True,
-        dir_okay=False,
-        help="Optional synopsis text/Markdown file.",
-    ),
-    domain: str = typer.Option("engineering", help="Research discipline."),
-    journal: str | None = typer.Option(None, help="Target journal, if known."),
-    paper_type: PaperType = typer.Option(PaperType.AUTO),
-) -> None:
-    """Initialize without running; paperforge write is the minimal one-command path."""
-    synopsis = synopsis_file.read_text(encoding="utf-8").strip() if synopsis_file else None
+    project: Path,
+    topic: str = typer.Option(...),
+    domain: str = "engineering",
+    journal: str | None = None,
+    paper_type: str = "auto",
+    config: Path | None = None,
+):
+    """Create a fresh project; resolve defaults into its configuration."""
     try:
-        store = ProjectStore(project)
-        state = store.initialize(
-            ResearchProfile(
-                topic=topic,
-                synopsis=synopsis,
-                domain=domain,
-                requested_paper_type=paper_type,
-                target_journal=journal,
-            ),
-            _default_config(),
+        settings = load_settings(config) if config else Settings()
+        store = Store.create(
+            project,
+            Project(topic=topic, domain=domain, journal=journal, paper_type=paper_type),
+            settings,
         )
-    except (FileExistsError, OSError, ValueError) as exc:
-        _fail(str(exc))
-    console.print(f"[green]Created[/green] {store.root} ({state.project_id})")
-    console.print(f'Run: paperforge run "{store.root}"')
+        output(store.snapshot())
+    except (ValueError, OSError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
-@app.command()
-def run(
-    project: Path = typer.Argument(..., exists=True, file_okay=False),
-    provider: str | None = typer.Option(None, help="Override provider: ollama or mock."),
-    rebuild: bool = typer.Option(
-        False,
-        "--rebuild",
-        help="Preserve inputs and restart all generated stages.",
-    ),
-) -> None:
-    """Research, draft, review, export, and surface one post-run author validation set."""
-    _run_project(ProjectStore(project), provider=provider, force_rebuild=rebuild)
-
-
-@app.command()
-def status(project: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
-    """Show stage progress, readiness, and remaining author actions."""
-    store = ProjectStore(project)
+def execute(project: Path, until: str | None):
+    store = existing(project)
+    workflow = Workflow(store)
     try:
-        config = load_config(store.config_path)
-        state = store.load_state()
-    except (OSError, ValueError) as exc:
-        _fail(str(exc))
-    table = Table("Stage", "Status", "Score", "Model")
-    for stage in config.workflow.stages:
-        record = state.stage_records.get(stage)
-        table.add_row(
-            stage,
-            state.status_for(stage).value,
-            f"{record.score:.2f}" if record else "-",
-            record.model if record and record.model else "-",
+        output(workflow.run(until=until))
+    except Exception as exc:
+        typer.echo(
+            f"Workflow stopped: {exc}\nProgress is saved. Correct the cause, then run 'paperforge resume'.",
+            err=True,
         )
-    console.print(table)
-    if state.workflow_completed:
-        label = "submission candidate" if state.submission_ready else "author action required"
-        console.print(f"Overall: [bold]{label}[/bold]")
-    if state.author_actions:
-        console.print("\n[bold]Author actions[/bold]")
-        for action in state.author_actions:
-            prefix = "BLOCKING" if action.blocking else "Review"
-            console.print(f"- {prefix}: {action.action}")
-    if store.author_validation_path.exists():
-        validation = store.load_author_validation()
-        if validation.pending_items:
-            console.print(
-                f"\nAuthor validation: {len(validation.pending_items)} pending item(s) in "
-                f"{store.author_validation_path}"
-            )
+        raise typer.Exit(1) from exc
+    finally:
+        workflow.close()
+    if store.get("status") in {"failed", "awaiting_author"}:
+        raise typer.Exit(2)
 
 
 @app.command()
-def doctor(
-    project: Path = typer.Argument(..., exists=True, file_okay=False),
-    inference: bool = typer.Option(
-        False,
-        "--inference",
-        help="Also send a minimal prompt to verify actual model entitlement.",
-    ),
-) -> None:
-    """Check configuration, endpoint, model visibility, and optional inference access."""
-    store = ProjectStore(project)
-    provider: ModelProvider | None = None
-    try:
-        config = load_config(store.config_path)
-        provider = _provider(config)
-        healthy, message = provider.healthcheck()
-        console.print(("[green]OK:[/green] " if healthy else "[red]Failed:[/red] ") + message)
-        if not healthy:
-            raise typer.Exit(code=1)
-        available = set(provider.available_models())
-        for model in sorted({role.model for role in config.models.values()}):
-            label = "visible" if not available or model in available else "not listed"
-            console.print(f"  {model}: {label}")
-        if inference:
-            response = provider.generate(
-                ModelRequest(
-                    role="planner",
-                    system="Return a concise response.",
-                    prompt="Reply with exactly OK.",
-                    temperature=0,
-                    metadata={"operation": "doctor"},
+def run(project: Path, until: str | None = None):
+    """Run pending stages; optionally stop after a named stage."""
+    execute(project, until)
+
+
+@app.command()
+def resume(project: Path, until: str | None = None):
+    """Resume saved work; deferred projects require a continue decision."""
+    execute(project, until)
+
+
+@app.command()
+def status(project: Path):
+    """Read current progress without mutating running stage state."""
+    output(existing(project).snapshot())
+
+
+@app.command()
+def attach(project: Path, files: list[Path], role: str | None = None):
+    """Copy attachments; optionally declare dataset/source/figure/code/author_note/artifact."""
+    store = existing(project)
+    roles = {"author_note", "dataset", "source", "figure", "code", "artifact"}
+    if role and role not in roles:
+        raise typer.BadParameter(f"Role must be one of {sorted(roles)}")
+    with store.lock():
+        paths = []
+        manifest_path = store.root / "inputs" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+        for source in files:
+            if not source.is_file() or source.is_symlink():
+                raise typer.BadParameter("Attach regular files, not directories or symlinks")
+            target = store.root / "inputs" / source.name
+            if target.exists():
+                raise typer.BadParameter(
+                    f"Attachment already exists: {source.name}. Rename or edit it explicitly."
                 )
+            if source.name in {"manifest.json", "source-dois.json"} and role:
+                raise typer.BadParameter("Reserved metadata files cannot receive an evidence role")
+            shutil.copy2(source, target)
+            paths.append(source.name)
+            if role:
+                manifest[source.name] = role
+        if manifest:
+            store.write("inputs/manifest.json", json.dumps(manifest, indent=2))
+        store.event("attachments", {"files": paths, "role": role})
+    output(
+        {
+            "attached": paths,
+            "next": "run/resume detects input changes and revalidates dependent stages",
+        }
+    )
+
+
+@app.command("model")
+def set_model(
+    project: Path,
+    name: str,
+    provider: str,
+    model: str | None = None,
+    model_version: str | None = None,
+    billing: str = "unknown",
+    base_url: str | None = None,
+    api_key_env: str | None = None,
+    input_rate: float | None = None,
+    output_rate: float | None = None,
+    temperature: float = 0.1,
+    max_output_tokens: int = 4096,
+    select: bool = False,
+):
+    """Add a named model route; paid rate ceilings are INR per million tokens."""
+    store = existing(project)
+    try:
+        new_model = Model(
+            provider=provider,
+            model=model,
+            version=model_version,
+            billing=billing,
+            base_url=base_url,
+            api_key_env=api_key_env,
+            input_inr_per_million=input_rate,
+            output_inr_per_million=output_rate,
+            temperature=temperature,
+            max_output_tokens=max_output_tokens,
+        )
+        with store.lock():
+            settings = load_settings(store.config_path)
+            settings.models[name] = new_model
+            if select:
+                settings.default_routes = [name]
+            write_settings(
+                store.config_path, Settings.model_validate(settings.model_dump(mode="json"))
             )
-            console.print(f"[green]Inference OK:[/green] {response.model}")
-        elif isinstance(provider, OllamaProvider):
-            console.print("Use --inference to verify plan entitlement, not only model visibility.")
-    except (OSError, ProviderError, ValueError) as exc:
-        _fail(str(exc))
-    finally:
-        if provider:
-            provider.close()
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    output(
+        {
+            "route": name,
+            "requested_model": new_model.requested_id,
+            "billing": new_model.billing,
+            "selected_as_default": select,
+            "completed_work_preserved": True,
+        }
+    )
 
 
 @app.command()
-def validate(project: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
-    """Run the deterministic final manuscript gates without a model call."""
-    store = ProjectStore(project)
-    try:
-        config = load_config(store.config_path)
-        context = ValidationContext(
-            config=config,
-            plan=store.load_plan(),
-            evidence=store.load_evidence(),
-            references=store.load_references(),
-            publication_profile=store.load_publication_profile(),
-            claim_ledger=store.load_claim_ledger(),
-            evidence_coverage=store.load_evidence_coverage(),
-        )
-        issues = validate_manuscript(
-            store.read_manuscript(),
-            context,
-            review_type="final_review",
-        )
-    except (OSError, ValueError) as exc:
-        _fail(str(exc))
-    if not issues:
-        console.print("[green]All deterministic final gates passed.[/green]")
-        return
-    for issue in issues:
-        console.print(
-            f"[{issue.severity.value}] {issue.code}: {issue.description} "
-            f"({issue.disposition.value if issue.disposition else 'unclassified'})"
-        )
-    if any(issue.disposition == IssueDisposition.INTEGRITY_BLOCKER for issue in issues):
-        raise typer.Exit(code=1)
-
-
-@app.command()
-def export(project: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
-    """Recreate all output artifacts from the current manuscript and state."""
-    store = ProjectStore(project)
-    try:
-        report = OutputExporter(store).export(store.load_state())
-    except (OSError, ValueError) as exc:
-        _fail(str(exc))
-    for path in report.files:
-        console.print(f"[green]Created[/green] {path}")
-    for warning in report.warnings:
-        console.print(f"[yellow]Warning:[/yellow] {warning}")
-
-
-def _run_project(
-    store: ProjectStore,
-    *,
-    provider: str | None,
-    force_rebuild: bool,
-) -> None:
-    model_provider: ModelProvider | None = None
-    literature: LiteratureService | None = None
-    try:
-        config = load_config(store.config_path)
-        model_provider = _provider(config, provider)
-        engine, literature = _engine(store, config, model_provider)
-        report = engine.run(force_rebuild=force_rebuild)
-    except (
-        FileLockTimeout,
-        LiteratureError,
-        OSError,
-        ProviderError,
-        ValueError,
-        KeyError,
-    ) as exc:
-        _fail(str(exc))
-    finally:
-        if literature:
-            literature.close()
-        if model_provider:
-            model_provider.close()
-    _print_run_report(store, report)
-
-
-def _print_run_report(store: ProjectStore, report: WorkflowReport) -> None:
-    if report.invalidated:
-        console.print("[yellow]Input change detected; generated stages were rebuilt.[/yellow]")
-    if report.resumed_stages:
-        console.print(f"Resumed {report.resumed_stages} completed stage(s).")
-    for record in report.records:
-        console.print(f"{record.stage}: {record.status.value} (score={record.score:.2f})")
-        for change in record.changes:
-            console.print(f"  revised: {change}")
-    state = store.load_state()
-    if state.workflow_completed:
-        if state.submission_ready:
-            console.print("[green]Completed: publication submission candidate.[/green]")
+def route(project: Path, names: list[str], stage: str | None = None, role: str | None = None):
+    """Set ordered default, role or stage routes and explicit fallbacks."""
+    store = existing(project)
+    if stage and role:
+        raise typer.BadParameter("Choose --stage or --role, not both")
+    if role and role not in {"extractor", "planner", "writer", "reviewer", "reviser"}:
+        raise typer.BadParameter("Unknown model role")
+    with store.lock():
+        settings = load_settings(store.config_path)
+        if stage:
+            settings.stage_routes[stage] = names
+        elif role:
+            settings.role_routes[role] = names
         else:
-            console.print(
-                "[yellow]Completed: manuscript and research package generated; author validation "
-                "remains before submission.[/yellow]"
-            )
-        if store.author_validation_path.exists():
-            validation = store.load_author_validation()
-            if validation.pending_items:
-                console.print(
-                    f"[yellow]Review once:[/yellow] {store.author_validation_path} "
-                    f"({len(validation.pending_items)} pending item(s))."
-                )
-                console.print(
-                    "The draft already uses bounded disclosures; rerun only to incorporate your "
-                    "validated study facts."
-                )
-    elif report.records and report.records[-1].status == StageStatus.BLOCKED:
-        console.print("[red]Stopped at a genuine evidence-integrity blocker.[/red]")
-        for issue in report.records[-1].issues:
-            if issue.disposition == IssueDisposition.INTEGRITY_BLOCKER:
-                console.print(f"  {issue.code}: {issue.description}")
-                console.print(f"    Required: {issue.required_change}")
-        evidence_actions = store.root / "author-actions" / "evidence-required.md"
-        if report.records[-1].stage == "evidence_mapping" and evidence_actions.exists():
-            console.print(f"[yellow]Complete the evidence prompts:[/yellow] {evidence_actions}")
-            console.print("Save answers under inputs/responses.yaml, then rerun paperforge run.")
-    for path in report.export.files:
-        console.print(f"  {path}")
-    for warning in report.export.warnings:
-        console.print(f"[yellow]Warning:[/yellow] {warning}")
+            settings.default_routes = names
+        try:
+            validated = Settings.model_validate(settings.model_dump(mode="json"))
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        write_settings(store.config_path, validated)
+    output({"routes": names, "stage": stage, "role": role})
 
 
-def _split_topic_and_synopsis(value: str) -> tuple[str, str | None]:
-    lines = [line.strip(" #\t") for line in value.splitlines() if line.strip()]
-    if len(value.split()) <= 24 and len(lines) == 1:
-        return value.strip(), None
-    topic = lines[0].rstrip(".") if lines else value[:140].strip()
-    if len(topic) > 180:
-        topic = " ".join(value.split()[:20]).rstrip(".,;:")
-    return topic, value.strip()
+@app.command()
+def policy(project: Path, mode: str = "free_first", budget_inr: float = 500):
+    """Set free_only/free_first/paid_only and the project budget."""
+    store = existing(project)
+    with store.lock():
+        settings = load_settings(store.config_path).model_dump(mode="json")
+        settings.update(policy=mode, budget_inr=budget_inr)
+        try:
+            validated = Settings.model_validate(settings)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        write_settings(store.config_path, validated)
+    output(
+        {"policy": mode, "budget_inr": budget_inr, "already_spent_or_reserved_inr": store.spent()}
+    )
 
 
-def _slug(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
-    return slug[:60].rstrip("-") or "paperforge-project"
+@app.command()
+def decide(
+    project: Path, action: str, note: str = "", stage: str | None = None, continue_run: bool = False
+):
+    """Record continue/revise/defer/cancel; decisions never bypass evidence gates."""
+    store = existing(project)
+    try:
+        store.decide(Decision(action=action, note=note, stage=stage))
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    output(store.snapshot())
+    if continue_run and action in {"continue", "revise"}:
+        execute(project, None)
 
 
-def _show_version(value: bool) -> bool:
-    if value:
-        console.print(f"PaperForge {__version__}")
-        raise typer.Exit()
-    return value
+@app.command()
+def retry(project: Path, stage: str):
+    """Regenerate one stage and dependents; keep prior audit history."""
+    store = existing(project)
+    if stage not in STAGES:
+        raise typer.BadParameter(f"Stage must be one of {STAGES}")
+    with store.lock():
+        if store.get("status") == "cancelled":
+            raise typer.BadParameter("Cancelled projects cannot be resumed")
+        store.invalidate(stage, "Explicit stage regeneration")
+    output(store.snapshot())
 
 
-def _fail(message: str) -> None:
-    console.print(f"[red]Error:[/red] {message}")
-    raise typer.Exit(code=1)
+@app.command()
+def doctor(project: Path):
+    """Check configuration/credential presence without a billable inference call."""
+    store = existing(project)
+    settings = load_settings(store.config_path)
+    workflow = Workflow(store, settings)
+    try:
+        output(
+            {
+                "policy": settings.policy,
+                "budget_inr": settings.budget_inr,
+                "routes": {
+                    name: {
+                        "provider": model.provider,
+                        "model": model.requested_id,
+                        "billing": model.billing,
+                        "eligible": workflow.gateway._eligible(model),
+                    }
+                    for name, model in settings.models.items()
+                },
+                "note": "Credential presence does not prove entitlement, availability or free quota.",
+            }
+        )
+    finally:
+        workflow.close()
 
 
 if __name__ == "__main__":

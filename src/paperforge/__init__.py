@@ -1,3 +1,3 @@
-"""PaperForge research workflow agent."""
+"""PaperForge: evidence-first manuscript workflows with durable checkpoints."""
 
-__version__ = "2.1.0"
+__version__ = "3.0.0"
