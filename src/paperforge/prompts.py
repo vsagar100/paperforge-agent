@@ -31,7 +31,9 @@ APPRAISE = (
     + """
 Extract the method, dataset/system, principal finding and author-reported limitation from the
 accessible text of this ONE source. Each non-null fact must include a concise independent summary
-and an EXACT supporting quote. Return null where the accessible material does not report a fact.
+and an EXACT supporting quote copied character-for-character from accessible_text. Do not
+change punctuation, whitespace, case, spelling, or insert ellipses in quotes. Return null
+where the accessible material does not report a fact; never invent a supporting quote.
 Do not infer a limitation of the entire paper merely because the abstract omits details.
 Record missing accessible details separately. Categorize the method for critical synthesis.
 Return the exact supplied source_id. Do not copy source wording into the summary.

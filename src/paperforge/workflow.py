@@ -9,7 +9,7 @@ from paperforge.environment import load_environment
 from paperforge.export import export_packet
 from paperforge.inputs import Ingestor, input_signature
 from paperforge.literature import Literature, LiteratureFailure
-from paperforge.llm import Gateway
+from paperforge.llm import EvidenceValidationError, Gateway
 from paperforge.prompts import APPRAISE, DRAFT, PLAN, REVIEW
 from paperforge.schemas import (
     InputItem,
@@ -267,18 +267,34 @@ class Workflow:
                         "access_level": source.access_level,
                         "accessible_text": material,
                     },
+                    validate=lambda value, source=source, material=material: (
+                        self._validate_appraisal(value, source, material)
+                    ),
                 )
             )
-            if assessment.source_id != source.id:
-                raise ValueError("Source appraisal returned a different source ID")
-            for field in ("method", "dataset_or_system", "finding", "reported_limitation"):
-                fact = getattr(assessment, field)
-                if fact and fact.quote not in material:
-                    raise ValueError("Source appraisal quote does not occur in accessible material")
+            # Revalidate saved checkpoints too; only accepted appraisals may be reused.
+            self._validate_appraisal(assessment, source, material)
             self.store.checkpoint(key, assessment.model_dump(mode="json"))
             assessments.append(assessment.model_dump(mode="json"))
         output["assessments"] = assessments
         return output
+
+    @staticmethod
+    def _validate_appraisal(assessment: SourceAssessment, source: Source, material: str) -> None:
+        errors = []
+        if assessment.source_id != source.id:
+            errors.append("source_id differs from the supplied source_id")
+        for field in ("method", "dataset_or_system", "finding", "reported_limitation"):
+            fact = getattr(assessment, field)
+            if fact and (not fact.quote.strip() or fact.quote not in material):
+                errors.append(f"{field}.quote does not occur exactly in accessible_text")
+        if errors:
+            raise EvidenceValidationError(
+                f"Source appraisal {source.id}: {'; '.join(errors)}. "
+                "Use the supplied source_id and verbatim supporting quotes; "
+                "return null for unsupported facts. If repairs fail, select another extractor "
+                "model or supply accessible source text, then resume."
+            )
 
     def _context(self) -> dict:
         # Explicit excerpt selection; do not claim complete reading of omitted document chunks.

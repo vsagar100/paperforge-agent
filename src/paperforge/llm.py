@@ -19,6 +19,10 @@ class GatewayFailure(RuntimeError):
     pass
 
 
+class EvidenceValidationError(ValueError):
+    """A safe, actionable diagnostic from a deterministic evidence validator."""
+
+
 class Gateway:
     """Persist every request attempt; uncertain billing remains charged to the local budget."""
 
@@ -126,7 +130,14 @@ class Gateway:
         raise GatewayFailure("No permitted model route succeeded. " + "; ".join(failures))
 
     def structured(
-        self, schema: type[T], *, stage: str, role: str, system: str, context: dict
+        self,
+        schema: type[T],
+        *,
+        stage: str,
+        role: str,
+        system: str,
+        context: dict,
+        validate: Callable[[T], None] | None = None,
     ) -> T:
         material = json.dumps(context, ensure_ascii=False)
         if len(material) > self.settings.max_context_chars:
@@ -142,13 +153,26 @@ class Gateway:
                 text = reply.text.strip()
                 if text.startswith("```json\n") and text.endswith("```"):
                     text = text[8:-3].strip()
-                return schema.model_validate_json(text)
+                result = schema.model_validate_json(text)
+                if validate:
+                    validate(result)
+                return result
             except (ValidationError, ValueError) as exc:
-                errors.append(type(exc).__name__)
+                errors.append(
+                    str(exc) if isinstance(exc, EvidenceValidationError) else type(exc).__name__
+                )
                 if attempt == self.settings.max_schema_repairs:
                     break
+                instruction = (
+                    "Repair the reported evidence errors as well as JSON syntax/schema. "
+                    "Copy supporting quotes exactly from the original accessible_text. "
+                    "For facts absent from that text, return null and record the missing detail. "
+                    "Never paraphrase inside a quote or invent evidence."
+                    if isinstance(exc, EvidenceValidationError)
+                    else "Repair JSON syntax/schema only. Preserve evidence and claims."
+                )
                 prompt = (
-                    f"Repair JSON syntax/schema only. Preserve evidence and claims. Error: {str(exc)[:1500]}\n"
+                    f"{instruction} Error: {str(exc)[:1500]}\n"
                     f"Original task:\n{material}\nInvalid output:\n{reply.text}\nSchema:\n{schema_text}"
                 )
         raise GatewayFailure("Structured response failed validation: " + ", ".join(errors))

@@ -2,6 +2,8 @@
 
 ## Unreleased — PowerShell setup and saved credentials
 
+- Repair source appraisal quote/identity errors within the configured schema-repair limit;
+  keep exact-quote checks, accepted checkpoints and actionable source/field diagnostics.
 - Load repository/project .env with explicit precedence and UTF-8 BOM support.
 - Add a dot-source PowerShell activation/environment helper and end-to-end Windows guide.
 - Add non-generating model discovery, one-request route probes and informative Gemini 404 guidance.

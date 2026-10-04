@@ -58,14 +58,17 @@ class StageFixture:
     def close(self):
         pass
 
-    def structured(self, schema, *, stage, role, system, context):
+    def structured(self, schema, *, stage, role, system, context, validate=None):
         title = context.get("requested_section", "")
         self.calls[(schema.__name__, title, role)] += 1
         if title == self.fail_title:
             self.fail_title = None
             raise GatewayFailure("Injected interruption")
         if schema == SourceAssessment:
-            return SourceAssessment(source_id=context["source_id"], category="thermal")
+            result = SourceAssessment(source_id=context["source_id"], category="thermal")
+            if validate:
+                validate(result)
+            return result
         if schema == StudyPlan:
             return StudyPlan(
                 research_question="How should thermal methods be evaluated?",

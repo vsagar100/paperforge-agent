@@ -231,6 +231,25 @@ After network/key/model/disk failures, correct the cause and resume. Accepted wo
 paperforge resume projects/thermal
 ~~~
 
+If literature fails with a source appraisal quote error, update the enhanced-writing branch
+and resume; evidence validation now participates in the bounded repair loop:
+
+~~~powershell
+git pull --ff-only origin feat/enhanced_writing
+python -m pip install -e ".[documents,scientific]"
+paperforge resume projects/thermal --until literature
+paperforge resume projects/thermal
+~~~
+
+Appraisals require character-for-character quotes from the retrieved text. A repair must
+copy a real quote or mark an unsupported fact null; the workflow does not accept invented
+evidence. The project's max_schema_repairs setting bounds the shared schema/evidence repair
+loop (default 1, maximum 3). If all repairs fail, the error identifies the source and fields.
+Select an accessible alternative extractor model, then resume. Repeating an unchanged
+exhausted request can reuse its cached failed validation; changing the model changes the
+request cache key. Accepted source appraisals remain checkpointed. Supplying additional
+source text changes inputs and triggers scientific revalidation.
+
 At awaiting_author, provide the required genuine evidence or change the scope:
 
 ~~~powershell
