@@ -5,6 +5,7 @@ import json
 from paperforge.analytics import analyze
 from paperforge.audit import audit_sections, issue, source_text, unresolved_placeholders
 from paperforge.config import Settings, load_settings
+from paperforge.environment import load_environment
 from paperforge.export import export_packet
 from paperforge.inputs import Ingestor, input_signature
 from paperforge.literature import Literature, LiteratureFailure
@@ -76,6 +77,7 @@ class Workflow:
         gateway: Gateway | None = None,
         literature: Literature | None = None,
     ):
+        load_environment(store.root)
         self.store = store
         self.settings = settings or load_settings(store.config_path)
         self.gateway = gateway or Gateway(store, self.settings)

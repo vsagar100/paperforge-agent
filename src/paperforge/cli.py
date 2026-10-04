@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from uuid import uuid4
 
 import typer
-from dotenv import load_dotenv
 
 from paperforge import __version__
 from paperforge.config import Model, Settings, load_settings, write_settings
+from paperforge.environment import load_environment
+from paperforge.llm import Gateway, GatewayFailure
+from paperforge.providers import HTTPProvider, ProviderFailure
 from paperforge.schemas import Decision, Project
 from paperforge.store import STAGES, Store
 from paperforge.workflow import Workflow
@@ -28,7 +31,7 @@ def existing(path: Path) -> Store:
         raise typer.BadParameter(
             "Not a v3 project. Initialize a new directory; v2 projects remain untouched."
         )
-    load_dotenv(store.root / ".env", override=False)
+    load_environment(store.root)
     return store
 
 
@@ -49,6 +52,7 @@ def init(
 ):
     """Create a fresh project; resolve defaults into its configuration."""
     try:
+        load_environment()
         settings = load_settings(config) if config else Settings()
         store = Store.create(
             project,
@@ -208,6 +212,66 @@ def route(project: Path, names: list[str], stage: str | None = None, role: str |
 
 
 @app.command()
+def models(project: Path, name: str):
+    """List provider model metadata using saved credentials; no generation or route change."""
+    store = existing(project)
+    settings = load_settings(store.config_path)
+    if name not in settings.models:
+        raise typer.BadParameter("Unknown route name; configure it with 'paperforge model'")
+    backend = HTTPProvider()
+    try:
+        output(
+            {
+                "route": name,
+                "models": backend.list_models(settings.models[name]),
+                "note": "Listing does not prove generation access or free entitlement. Test the selected route with 'paperforge probe'.",
+            }
+        )
+    except ProviderFailure as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        backend.close()
+
+
+@app.command()
+def probe(project: Path, name: str):
+    """Make one small generation request on exactly this route; normal billing/cap applies."""
+    store = existing(project)
+    settings = load_settings(store.config_path)
+    if name not in settings.models:
+        raise typer.BadParameter("Unknown route name; configure it with 'paperforge model'")
+    data = settings.model_dump(mode="json")
+    data.update(default_routes=[name], stage_routes={}, role_routes={}, max_retries=0)
+    # A probe always tests the current credential, rather than reusing an old success.
+    gateway = Gateway(store, Settings.model_validate(data))
+    try:
+        with store.lock():
+            reply = gateway.call(
+                "probe",
+                "probe",
+                "You are checking text generation connectivity.",
+                f"Connectivity check {uuid4()}. Reply with OK.",
+            )
+        output(
+            {
+                "route": name,
+                "generation_succeeded": True,
+                "requested_model": reply.requested_model,
+                "returned_model": reply.returned_model,
+                "input_tokens": reply.input_tokens,
+                "output_tokens": reply.output_tokens,
+                "note": "One generation request was made; billing/cap policy applied. This does not prove scientific writing quality or future quota.",
+            }
+        )
+    except GatewayFailure as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        gateway.close()
+
+
+@app.command()
 def policy(project: Path, mode: str = "free_first", budget_inr: float = 500):
     """Set free_only/free_first/paid_only and the project budget."""
     store = existing(project)
@@ -263,6 +327,11 @@ def doctor(project: Path):
             {
                 "policy": settings.policy,
                 "budget_inr": settings.budget_inr,
+                "env_files": [str(path) for path in load_environment(store.root)],
+                "configuration_file": str(store.config_path),
+                "default_routes": settings.default_routes,
+                "stage_routes": settings.stage_routes,
+                "role_routes": settings.role_routes,
                 "routes": {
                     name: {
                         "provider": model.provider,
@@ -272,7 +341,7 @@ def doctor(project: Path):
                     }
                     for name, model in settings.models.items()
                 },
-                "note": "Credential presence does not prove entitlement, availability or free quota.",
+                "note": "Credential presence does not prove entitlement, availability or free quota. Use 'paperforge models' and 'paperforge probe' before writing.",
             }
         )
     finally:

@@ -24,7 +24,11 @@ ProviderName = Literal[
 # Baseline defaults, not a claimed scientific benchmark ranking. Resolve once into project YAML.
 PRESETS = {
     "ollama": ("http://localhost:11434", "gpt-oss:20b", "OLLAMA_API_KEY"),
-    "gemini": ("https://generativelanguage.googleapis.com", "gemini-2.5-flash", "GEMINI_API_KEY"),
+    "gemini": (
+        "https://generativelanguage.googleapis.com",
+        "gemini-3.5-flash-lite",
+        "GEMINI_API_KEY",
+    ),
     "anthropic": ("https://api.anthropic.com", None, "ANTHROPIC_API_KEY"),
     "openai": ("https://api.openai.com/v1", None, "OPENAI_API_KEY"),
     "groq": ("https://api.groq.com/openai/v1", "openai/gpt-oss-120b", "GROQ_API_KEY"),
@@ -54,6 +58,9 @@ class Model(StrictModel):
         url, model, env = PRESETS[self.provider]
         self.base_url = (self.base_url or url or "").rstrip("/")
         self.model = self.model or model
+        if self.provider == "gemini":
+            self.model = self.model.removeprefix("models/") if self.model else self.model
+            self.version = self.version.removeprefix("models/") if self.version else self.version
         self.api_key_env = self.api_key_env or env
         if not self.model or not self.model.strip():
             raise ValueError(f"An explicit model ID is required for {self.provider}")

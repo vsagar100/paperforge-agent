@@ -6,7 +6,7 @@ stages fail validation. Model defaults do not guarantee future availability.
 | Provider | Protocol | Default ID | Credential |
 |---|---|---|---|
 | Ollama | Native chat | gpt-oss:20b | OLLAMA_API_KEY, optional locally |
-| Gemini | generateContent | gemini-2.5-flash | GEMINI_API_KEY |
+| Gemini | generateContent | gemini-3.5-flash-lite | GEMINI_API_KEY |
 | Groq | Compatible chat | openai/gpt-oss-120b | GROQ_API_KEY |
 | DeepSeek | Compatible chat | deepseek-flash | DEEPSEEK_API_KEY |
 | Mistral | Compatible chat | mistral-small-latest | MISTRAL_API_KEY |
@@ -61,6 +61,28 @@ Budget accounting uses configured price ceilings, not the provider's final bill.
 fees, price changes and server behavior can differ. Use provider-side spend limits too.
 Hosted free entitlement is an author assertion; a key cannot certify pricing/quota. Local
 inference still uses hardware/electricity. doctor checks credentials without a billable call.
+
+## Saved environment and connection checks
+
+Shared keys go in repository .env; project-specific keys go in PROJECT/.env.
+Nonblank existing process values win, followed by project values, then repository defaults.
+UTF-8 with or without BOM is accepted. Blank example keys do not erase shared values.
+Model selections, snapshots, billing ceilings and routes live in PROJECT/paperforge.yaml.
+The Python Workflow API also loads saved keys. No secret values are printed by doctor.
+
+paperforge models PROJECT ROUTE requests provider metadata only. It handles Gemini and
+Anthropic pagination, local Ollama tags and compatible model endpoints. It does not change
+routes or guarantee free entitlement or generation access. Provider metadata services may
+themselves have rate limits/access policies.
+
+paperforge probe PROJECT ROUTE makes one new generation request on exactly that named route,
+with retries/fallback disabled and normal billing/cap accounting. It leaves stages untouched.
+Each invocation checks again; it cannot return an old success after a key rotation.
+
+Google's Gemini 2.5 access is restricted for new users. New Gemini routes default to
+gemini-3.5-flash-lite; existing YAML is not silently changed. If a route returns 404, choose
+an ID supported by the current account, probe it and resume. A listed model can still return
+404 during generation. See the [PowerShell guide](POWERSHELL_GUIDE.md).
 
 Official API references:
 [Ollama](https://docs.ollama.com/api), [Gemini](https://ai.google.dev/gemini-api/docs),

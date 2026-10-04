@@ -36,3 +36,31 @@ jobs:
         run: python -m pytest --cov=paperforge --cov-report=term-missing
       - name: Build
         run: python -m build
+
+  windows-powershell:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install in Windows virtual environment
+        run: |
+          python -m venv .venv
+          if ($LASTEXITCODE -ne 0) { throw "venv failed" }
+          & .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+          if ($LASTEXITCODE -ne 0) { throw "install failed" }
+      - name: PowerShell activation, saved keys and refresh
+        run: |
+          . .\tests\powershell_smoke.ps1
+      - name: CLI and diagnostics tests on Windows
+        run: |
+          & .\.venv\Scripts\python.exe -m pytest tests/test_cli.py tests/test_environment.py tests/test_diagnostics.py
+          if ($LASTEXITCODE -ne 0) { throw "tests failed" }

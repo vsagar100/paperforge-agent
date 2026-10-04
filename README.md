@@ -6,6 +6,9 @@ Accepted writing survives failures, and author decisions explicitly continue the
 The [supplied manuscript prompt](docs/MANUSCRIPT_REQUIREMENTS.md) is retained for reference.
 The earlier implementation is replaced; old projects are not migrated automatically.
 
+**Windows/PowerShell:** start with the [end-to-end PowerShell guide](docs/POWERSHELL_GUIDE.md).
+It covers saved keys, model/provider switching, checking Gemini access, stages and author decisions.
+
 ## Install and start
 
 Python 3.11+:
@@ -45,11 +48,20 @@ paperforge route projects/thermal local google --role writer
 paperforge route projects/thermal google local --stage review
 ~~~
 
-Put keys in projects/thermal/.env or exported variables. Keys never enter YAML/call records.
+Put shared keys in the repository's .env, or project-specific keys in projects/thermal/.env.
+Project commands load them automatically: process environment > project .env > repository .env.
+Blank placeholders are ignored. The optional scripts/Enter-PaperForge.ps1 helper activates
+.venv and imports these values into PowerShell when dot-sourced. Keys never enter YAML/call records.
 Provider and complete native model/snapshot IDs can change globally, by role or by stage.
 Fallback uses only listed routes. Hosted unknown billing routes are excluded; paid routes
 require current INR-per-million input/output ceiling rates. Changing routes/budget preserves
 accepted work; paperforge retry projects/thermal draft deliberately regenerates writing.
+
+The current Gemini default is gemini-3.5-flash-lite. Existing saved routes are preserved;
+update them explicitly with --model if still using Gemini 2.5 (which has restricted account access).
+Use paperforge models projects/thermal google for metadata, then paperforge probe
+projects/thermal google for one actual generation check with normal billing/cap policy.
+doctor checks configuration and key presence, not generation availability.
 
 ## Inputs and topic-only work
 

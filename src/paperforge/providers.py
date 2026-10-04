@@ -40,6 +40,98 @@ class HTTPProvider:
             os.getenv(model.api_key_env or "", "").strip()
         )
 
+    @staticmethod
+    def error_message(model: Model, status: int) -> str:
+        message = f"{model.provider} returned HTTP {status} for {model.requested_id}"
+        if status == 404 and model.provider == "gemini":
+            message += (
+                ". Model access or API-version/resource availability may differ for this account. "
+                "Gemini 2.5 access is restricted for new accounts; try a current supported ID. "
+                "Use 'paperforge models PROJECT ROUTE', update 'paperforge model --model', "
+                "then 'paperforge probe PROJECT ROUTE' and resume."
+            )
+        return message
+
+    def list_models(self, model: Model) -> list[dict]:
+        """Read metadata, never generate or silently change the chosen model."""
+        if not self.has_credentials(model):
+            raise ProviderFailure(f"Set {model.api_key_env} for provider {model.provider}")
+        key = os.getenv(model.api_key_env or "", "").strip()
+        headers, params = {}, {}
+        if model.provider == "gemini":
+            endpoint = "/v1beta/models"
+            headers["x-goog-api-key"] = key
+            params["pageSize"] = 1000
+        elif model.provider == "ollama":
+            endpoint = "/api/tags"
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+        elif model.provider == "anthropic":
+            endpoint = "/v1/models"
+            headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
+            params["limit"] = 100
+        else:
+            endpoint = "/models"
+            headers["Authorization"] = f"Bearer {key}"
+        records, seen_pages = {}, set()
+        for _ in range(10):
+            try:
+                response = self.client.get(
+                    (model.base_url or "") + endpoint,
+                    headers=headers,
+                    params=params,
+                    timeout=model.timeout_seconds,
+                )
+            except httpx.RequestError as exc:
+                raise ProviderFailure(
+                    f"{model.provider} model listing connection failed ({type(exc).__name__})"
+                ) from exc
+            if not response.is_success:
+                raise ProviderFailure(self.error_message(model, response.status_code))
+            try:
+                body = response.json()
+                rows = body["models"] if model.provider in {"gemini", "ollama"} else body["data"]
+                if not isinstance(rows, list):
+                    raise ValueError("Invalid model list")
+                for item in rows:
+                    name = (
+                        item.get("name")
+                        if model.provider in {"gemini", "ollama"}
+                        else item.get("id")
+                    )
+                    if not isinstance(name, str) or not name:
+                        raise ValueError("Model lacks an identifier")
+                    identifier = (
+                        name.removeprefix("models/") if model.provider == "gemini" else name
+                    )
+                    records[identifier] = {"id": identifier}
+                    if model.provider == "gemini":
+                        records[identifier].update(
+                            supported_generation_methods=item.get("supportedGenerationMethods", []),
+                            input_token_limit=item.get("inputTokenLimit"),
+                            output_token_limit=item.get("outputTokenLimit"),
+                        )
+                token = (
+                    body.get("nextPageToken")
+                    if model.provider == "gemini"
+                    else body.get("last_id")
+                    if model.provider == "anthropic" and body.get("has_more")
+                    else None
+                )
+                if model.provider == "anthropic" and body.get("has_more") and not token:
+                    raise ValueError("Missing pagination cursor")
+                if not token:
+                    return list(records.values())
+                if not isinstance(token, str) or token in seen_pages:
+                    raise ValueError("Invalid/repeated pagination")
+                seen_pages.add(token)
+                params["pageToken" if model.provider == "gemini" else "after_id"] = token
+            except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                raise ProviderFailure(f"{model.provider} returned unusable model metadata") from exc
+        raise ProviderFailure(
+            f"{model.provider} model list exceeded ten pages; narrow the request outside PaperForge"
+        )
+
     def generate(self, model: Model, system: str, prompt: str) -> Reply:
         key = os.getenv(model.api_key_env or "", "").strip()
         if not self.has_credentials(model):
@@ -131,7 +223,7 @@ class HTTPProvider:
             except ValueError:
                 delay = 0
             raise ProviderFailure(
-                f"{model.provider} returned HTTP {status} for {model_id}",
+                self.error_message(model, status),
                 retryable=retryable,
                 retry_after=delay,
                 uncertain=status >= 500 or status == 408,

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — PowerShell setup and saved credentials
+
+- Load repository/project .env with explicit precedence and UTF-8 BOM support.
+- Add a dot-source PowerShell activation/environment helper and end-to-end Windows guide.
+- Add non-generating model discovery, one-request route probes and informative Gemini 404 guidance.
+- Update new Gemini routes to gemini-3.5-flash-lite; preserve existing configured model IDs.
+- Show configuration paths, effective route overrides and dotenv file paths in doctor, without secrets.
+
 ## 3.0.0 — Fresh enhanced-writing implementation
 
 - Replace the earlier implementation with explicit stages and new project contracts.
