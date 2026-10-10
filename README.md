@@ -106,6 +106,13 @@ continue/revise invalidates selected dependents and preserves audit history.
 Approval cannot bypass evidence checks. Changed input bytes trigger dependent revalidation.
 Cancelled projects cannot resume. See [architecture and recovery](docs/ARCHITECTURE.md).
 
+## Bounded context and recovery
+
+Planning and writing use task-specific evidence packets with selection audits, while full
+sources and inputs remain saved. Large sources and manuscript reviews run in checkpointed
+batches; every manuscript paragraph is covered. Resume reuses accepted work, including sections
+saved before this upgrade. See [PowerShell recovery instructions](docs/POWERSHELL_GUIDE.md).
+
 ## Outputs and limits
 
 The project's outputs contains manuscript.md, optional manuscript.docx, source/claim registers,

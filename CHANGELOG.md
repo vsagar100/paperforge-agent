@@ -1,7 +1,15 @@
 # Changelog
 
-## Unreleased — PowerShell setup and saved credentials
+## Unreleased — Bounded manuscript context and durable recovery
 
+- Compose bounded task-specific evidence packets with exact excerpts, source diversity,
+  verified claim anchors and explicit selection/omission audits; retain full evidence locally.
+- Appraise oversized source text in contiguous checkpointed batches; review every manuscript
+  paragraph in bounded batches with a shared outline and resume accepted batches after failure.
+- Reuse previously accepted section/revision checkpoints after the context-management upgrade.
+- Validate plan identifiers and manuscript evidence inside model fallback before acceptance.
+- Add default-limit, 35-source HTTP-mocked full-workflow tests for both paper types,
+  including oversized papers/manuscripts, quota fallback and process-reopening recovery.
 - Fall back across configured routes after schema/evidence repairs fail, giving each model
   the original task and validating its response before acceptance.
 - On HTTP 429, prefer another eligible configured route over retrying the exhausted one.

@@ -6,6 +6,9 @@ Do not fabricate publications, source identifiers, study details, experiments, d
 Separate prior findings, author-supplied statements, actual computed results, interpretations and
 proposals. A metadata match establishes source existence, not support for a scientific claim.
 Abstract-only sources cannot justify unreported methods, datasets, metrics or limitations.
+context_selection describes a bounded, non-exhaustive evidence packet. source_catalog is a
+metadata index, not support for a scientific claim. Missing from this packet does not mean
+missing from a paper. Use only supplied exact excerpts/facts as claim support.
 Use natural, precise academic English. Do not promise journal acceptance, zero plagiarism,
 human authorship or evasion of AI detectors. Journal instructions override generic formatting.
 Missing results must be explicit [RESULT TO BE COMPUTED FROM DATA] placeholders.
@@ -35,7 +38,9 @@ and an EXACT supporting quote copied character-for-character from accessible_tex
 change punctuation, whitespace, case, spelling, or insert ellipses in quotes. Return null
 where the accessible material does not report a fact; never invent a supporting quote.
 Do not infer a limitation of the entire paper merely because the abstract omits details.
-Record missing accessible details separately. Categorize the method for critical synthesis.
+Record missing accessible details separately. If appraisal_batch is present, you are reading
+one contiguous part of this source, not the entire paper; absence in this batch proves no
+paper-wide limitation. Categorize the method for critical synthesis.
 Return the exact supplied source_id. Do not copy source wording into the summary.
 """
 )

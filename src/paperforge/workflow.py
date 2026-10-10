@@ -5,6 +5,7 @@ import json
 from paperforge.analytics import analyze
 from paperforge.audit import audit_sections, issue, source_text, unresolved_placeholders
 from paperforge.config import Settings, load_settings
+from paperforge.context import ContextComposer, section_batches, size, text_parts
 from paperforge.environment import load_environment
 from paperforge.export import export_packet
 from paperforge.inputs import Ingestor, input_signature
@@ -256,21 +257,7 @@ class Workflow:
             assessment = (
                 SourceAssessment.model_validate(cached)
                 if cached
-                else self.gateway.structured(
-                    SourceAssessment,
-                    stage="literature",
-                    role="extractor",
-                    system=APPRAISE,
-                    context={
-                        "source_id": source.id,
-                        "source_title": source.title,
-                        "access_level": source.access_level,
-                        "accessible_text": material,
-                    },
-                    validate=lambda value, source=source, material=material: (
-                        self._validate_appraisal(value, source, material)
-                    ),
-                )
+                else self._appraise(source, material)
             )
             # Revalidate saved checkpoints too; only accepted appraisals may be reused.
             self._validate_appraisal(assessment, source, material)
@@ -278,6 +265,81 @@ class Workflow:
             assessments.append(assessment.model_dump(mode="json"))
         output["assessments"] = assessments
         return output
+
+    def _appraise(self, source: Source, material: str) -> SourceAssessment:
+        base = {
+            "source_id": source.id,
+            "source_title": source.title,
+            "access_level": source.access_level,
+        }
+        full = {**base, "accessible_text": material}
+        if size(full) <= self.settings.max_context_chars:
+            parts = [(0, material)]
+        else:
+            overhead = size(
+                {
+                    **base,
+                    "accessible_text": "",
+                    "appraisal_batch": {"index": 0, "count": 0, "start": 0},
+                }
+            )
+            budget = min(30000, self.settings.max_context_chars - overhead - 128)
+            parts = text_parts(material, budget)
+        assessments = []
+        for index, (start, text) in enumerate(parts):
+            context = {**base, "accessible_text": text}
+            if len(parts) > 1:
+                context["appraisal_batch"] = {"index": index, "count": len(parts), "start": start}
+            key = "appraisal-batch:" + fingerprint(context)
+            cached = self.store.cached_checkpoint(key)
+            assessment = (
+                SourceAssessment.model_validate(cached)
+                if cached
+                else self.gateway.structured(
+                    SourceAssessment,
+                    stage="literature",
+                    role="extractor",
+                    system=APPRAISE,
+                    context=context,
+                    validate=lambda value, text=text: self._validate_appraisal(value, source, text),
+                )
+            )
+            self._validate_appraisal(assessment, source, text)
+            self.store.checkpoint(key, assessment.model_dump(mode="json"))
+            assessments.append(assessment)
+        merged = assessments[0].model_copy(deep=True)
+        fields = ("method", "dataset_or_system", "finding", "reported_limitation")
+        for field in fields:
+            setattr(
+                merged,
+                field,
+                next((getattr(a, field) for a in assessments if getattr(a, field)), None),
+            )
+        if len(parts) > 1:
+            # Missing within one batch is never presented as missing from the entire paper.
+            merged.missing_from_accessible_text = [
+                field for field in fields if getattr(merged, field) is None
+            ]
+            self.store.write(
+                "audit/appraisal/" + fingerprint([source.id, material]) + ".json",
+                json.dumps(
+                    {
+                        "source_id": source.id,
+                        "scope": "All accessible text appraised in contiguous batches; canonical matrix retains first supported fact per field",
+                        "batches": [
+                            {
+                                "start": start,
+                                "end": start + len(text),
+                                "assessment": a.model_dump(mode="json"),
+                            }
+                            for (start, text), a in zip(parts, assessments, strict=True)
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+        return merged
 
     @staticmethod
     def _validate_appraisal(assessment: SourceAssessment, source: Source, material: str) -> None:
@@ -296,7 +358,7 @@ class Workflow:
                 "model or supply accessible source text, then resume."
             )
 
-    def _context(self) -> dict:
+    def _legacy_context(self) -> dict:
         # Explicit excerpt selection; do not claim complete reading of omitted document chunks.
         inputs = [
             {
@@ -319,12 +381,41 @@ class Workflow:
             "results": self._output("analysis").get("results", []),
         }
 
-    def _plan(self) -> dict:
-        plan = self.gateway.structured(
-            StudyPlan, stage="plan", role="planner", system=PLAN, context=self._context()
+    def _context(self, task: dict | None = None) -> dict:
+        return ContextComposer(self.store, self.settings.max_context_chars).compose(
+            project=self.project.model_dump(mode="json"),
+            sources=self._sources(),
+            assessments=self._output("literature").get("assessments", []),
+            inputs=self._inputs(),
+            results=self._output("analysis").get("results", []),
+            task=task,
         )
-        if set(plan.gap_source_ids) - {source.id for source in self._sources()}:
-            raise ValueError("Research gap cites unknown sources")
+
+    def _validate_section(self, section: Section, title: str) -> None:
+        if section.title != title:
+            raise EvidenceValidationError(f"Return the requested section title {title!r}")
+        findings = audit_sections(
+            [section], self._sources(), self._inputs(), self._output("analysis").get("results", [])
+        )
+        if findings:
+            raise EvidenceValidationError(
+                "Section failed evidence gates: " + "; ".join(f.description for f in findings)
+            )
+
+    def _plan(self) -> dict:
+        def validate(plan):
+            if set(plan.gap_source_ids) - {source.id for source in self._sources()}:
+                raise EvidenceValidationError("Research gap cites unknown sources")
+
+        plan = self.gateway.structured(
+            StudyPlan,
+            stage="plan",
+            role="planner",
+            system=PLAN,
+            context=self._context(),
+            validate=validate,
+        )
+        validate(plan)
         candidates, warnings = [], []
         if plan.missing_evidence and plan.dataset_search_terms and self.settings.literature_enabled:
             try:
@@ -373,8 +464,7 @@ class Workflow:
         titles = RESEARCH_SECTIONS if resolved == "original_research" else REVIEW_SECTIONS
         sections = []
         for title in titles:
-            context = {
-                **self._context(),
+            task = {
                 "plan": self._output("plan")["plan"],
                 "paper_type": resolved,
                 "requested_section": title,
@@ -386,13 +476,21 @@ class Workflow:
                 if title == "Abstract"
                 else self.settings.minimum_section_words,
             }
-            key = "section:" + fingerprint([title, context, 1])
+            # Accepted writing belongs to canonical evidence, not to one packet layout.
+            key = "section:" + fingerprint([title, {**self._legacy_context(), **task}, 1])
             cached = self.store.cached_checkpoint(key)
             if cached:
                 section = Section.model_validate(cached)
+                self._validate_section(section, title)
             else:
+                context = self._context(task)
                 section = self.gateway.structured(
-                    Section, stage="draft", role="writer", system=DRAFT, context=context
+                    Section,
+                    stage="draft",
+                    role="writer",
+                    system=DRAFT,
+                    context=context,
+                    validate=lambda value, title=title: self._validate_section(value, title),
                 )
                 if section.title != title:
                     raise ValueError(f"Expected section {title!r}, received {section.title!r}")
@@ -405,10 +503,20 @@ class Workflow:
                 for _ in range(self.settings.max_schema_repairs):
                     if not issues:
                         break
-                    context["corrections"] = [finding.model_dump(mode="json") for finding in issues]
-                    context["previous_section"] = section.model_dump(mode="json")
+                    context = self._context(
+                        {
+                            **task,
+                            "corrections": [finding.model_dump(mode="json") for finding in issues],
+                            "previous_section": section.model_dump(mode="json"),
+                        }
+                    )
                     section = self.gateway.structured(
-                        Section, stage="draft", role="reviser", system=DRAFT, context=context
+                        Section,
+                        stage="draft",
+                        role="reviser",
+                        system=DRAFT,
+                        context=context,
+                        validate=lambda value, title=title: self._validate_section(value, title),
                     )
                     issues = audit_sections(
                         [section],
@@ -432,11 +540,78 @@ class Workflow:
             "sections": [section.model_dump(mode="json") for section in sections],
         }
 
+    def _review_batches(self, sections: list[Section], round_id: int) -> Review:
+        batches = section_batches(
+            sections,
+            self.settings.max_context_chars // 3,
+            max_paragraph_budget=self.settings.max_context_chars * 2 // 3,
+        )
+        outline = [
+            {
+                "title": s.title,
+                "paragraphs": len(s.paragraphs),
+                "words": sum(len(p.text.split()) for p in s.paragraphs),
+                "source_ids": sorted(
+                    {identifier for p in s.paragraphs for identifier in p.source_ids}
+                ),
+            }
+            for s in sections
+        ]
+        known_titles = {s.title for s in sections}
+
+        def validate(review):
+            if any(finding.section not in known_titles for finding in review.issues):
+                raise EvidenceValidationError("Reviewer must identify an existing section")
+
+        reviews = []
+        for index, batch in enumerate(batches):
+            context = self._context(
+                {
+                    "plan": self._output("plan")["plan"],
+                    "sections": batch,
+                    "manuscript_outline": outline,
+                    "review_batch": {
+                        "index": index,
+                        "count": len(batches),
+                        "scope": "Review the supplied paragraphs; use outline for manuscript structure. Other batches cover remaining paragraphs.",
+                    },
+                    "generation": self.store.get("epoch:review", 0),
+                    "review_round": round_id,
+                }
+            )
+            key = "review-batch:" + fingerprint(context)
+            cached = self.store.cached_checkpoint(key)
+            review = (
+                Review.model_validate(cached)
+                if cached
+                else self.gateway.structured(
+                    Review,
+                    stage="review",
+                    role="reviewer",
+                    system=REVIEW,
+                    context=context,
+                    validate=validate,
+                )
+            )
+            validate(review)
+            # Do not cache author blockers: a continue decision must allow a fresh assessment.
+            if not any(finding.blocking and finding.needs_author for finding in review.issues):
+                self.store.checkpoint(key, review.model_dump(mode="json"))
+            reviews.append(review)
+        issues, seen = [], set()
+        for review in reviews:
+            for finding in review.issues:
+                key = fingerprint(finding.model_dump(mode="json"))
+                if key not in seen:
+                    seen.add(key)
+                    issues.append(finding)
+        return Review(issues=issues, summary="\n".join(r.summary for r in reviews))
+
     def _review(self) -> dict:
         context_key = "review:" + fingerprint(
             [
                 self._output("draft"),
-                self._context(),
+                self._legacy_context(),
                 self._output("plan"),
                 self.store.get("epoch:review", 0),
             ]
@@ -448,19 +623,7 @@ class Workflow:
         ]
         completed_rounds = (checkpoint or {}).get("round", 0)
         for round_id in range(completed_rounds, self.settings.max_review_rounds + 1):
-            context = {
-                **self._context(),
-                "plan": self._output("plan")["plan"],
-                "sections": [s.model_dump(mode="json") for s in sections],
-                "generation": self.store.get("epoch:review", 0),
-                "review_round": round_id,
-            }
-            review = self.gateway.structured(
-                Review, stage="review", role="reviewer", system=REVIEW, context=context
-            )
-            known_titles = {section.title for section in sections}
-            if any(finding.section not in known_titles for finding in review.issues):
-                raise ValueError("Reviewer must identify an existing section")
+            review = self._review_batches(sections, round_id)
             review.issues += audit_sections(
                 sections,
                 self._sources(),
@@ -544,13 +707,17 @@ class Workflow:
                     stage="review",
                     role="reviser",
                     system=DRAFT,
-                    context={
-                        **self._context(),
-                        "requested_section": section.title,
-                        "plan": self._output("plan")["plan"],
-                        "previous_section": section.model_dump(mode="json"),
-                        "corrections": issues,
-                    },
+                    context=self._context(
+                        {
+                            "requested_section": section.title,
+                            "plan": self._output("plan")["plan"],
+                            "previous_section": section.model_dump(mode="json"),
+                            "corrections": issues,
+                        }
+                    ),
+                    validate=lambda value, title=section.title: self._validate_section(
+                        value, title
+                    ),
                 )
                 if revised.title != section.title:
                     raise ValueError("Revision changed requested section title")

@@ -78,3 +78,29 @@ A separate model review evaluates these concerns; author verification remains ne
 Dataset candidates are not executed experiments. Native runtimes, scientific image reasoning,
 additional statistical plug-ins, journal-template typesetting and a web UI are future extensions.
 The final QC packet reports missing evidence and always remains an author-review draft.
+
+## Bounded model context
+
+Canonical evidence is never replaced by a shortened prompt. For planning and section writing,
+a deterministic composer packs whole supported facts and exact contiguous excerpts within the
+serialized task-data budget. It prioritizes existing validated claim quotes, genuine calculator
+records and author notes; source owners are interleaved to avoid one long paper monopolizing the
+packet. A compact source catalog identifies the collection but cannot substantiate a claim.
+Every packet has a selection audit recording selected/omitted IDs, span locations and hashes.
+
+Oversized source appraisals read all accessible text in contiguous batches. Each accepted batch
+is checkpointed and its facts are validated against that exact batch. The canonical literature
+matrix retains the first supported fact per field; the appraisal audit retains all batch facts.
+Missing from one batch is never labeled as an author-reported paper-wide limitation.
+
+Review batches retain full paragraphs, their provenance and original titles. All paragraphs are
+covered, with a shared manuscript outline for structure. Each successful batch is checkpointed;
+issue lists are deduplicated and deterministic full-manuscript checks still run. Batch reviews
+are scoped assessments rather than a claim that one model saw all manuscript text simultaneously.
+Author blockers are reassessed after a continuation decision. Legacy accepted section and
+review-revision keys remain readable; changing packet composition does not discard that work.
+
+The character guard remains in the gateway for arbitrary oversized tasks. Mandatory instructions
+and single paragraphs are not silently clipped. This task-data limit does not measure provider
+context tokens or guarantee entitlement/quota. Model repairs additionally contain the rejected
+response and schema; provider output/token limits and rate limits still apply.

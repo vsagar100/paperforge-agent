@@ -485,3 +485,36 @@ paperforge resume projects/thermal
 ~~~
 
 No key assignment, provider-selection command or project initialization is repeated.
+
+## Recover from the earlier context-limit failure
+
+From your activated PowerShell virtual environment, update the enhanced-writing branch and
+resume the existing project. Keep its configuration, input files and database:
+
+~~~powershell
+git pull --ff-only origin feat/enhanced_writing
+python -m pip install -e ".[documents,scientific]"
+$Project = 'projects/topic-paper'
+paperforge resume $Project
+~~~
+
+There is no need to recreate the project, repeat API-key assignments, or increase
+max_context_chars for the normal multi-source workflow. The writer receives bounded evidence
+packets rather than repeated full papers. Large source texts are appraised in contiguous
+batches; manuscript review covers every paragraph across bounded batches. Accepted appraisals,
+sections, revisions and review batches survive interruption. Previously saved accepted section
+checkpoints remain reusable after this update.
+
+Full sources, extracted inputs, appraisals and manuscript sections remain in the project.
+Selection audits are under audit/context; batched source appraisals under audit/appraisal.
+Omitted packet material is disclosed, and absence from a selected packet is never evidence
+that the original paper lacks that information. Batching can increase request count, so the
+configured provider quotas, pacing, route policies and spending cap still apply.
+
+max_context_chars measures serialized TASK DATA characters, not a provider's token context
+window or tokens-per-minute quota. An individually enormous paragraph or mandatory plan may
+still need splitting; the application reports that specific unit instead of dropping it.
+~~~powershell
+paperforge status $Project
+Invoke-Item "$Project/outputs"
+~~~
