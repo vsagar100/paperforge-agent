@@ -98,6 +98,10 @@ paperforge decide projects/thermal cancel
 ~~~
 
 Failed stages retry on run/resume. Completed stages and accepted sections survive.
+Configured fallback chains cover provider errors and exhausted JSON/evidence repairs.
+Use paperforge route PROJECT --free to save available configured free routes and enforce
+free_only; add --stage literature if that stage has an override. Each fallback is validated
+against the original evidence before acceptance. See the PowerShell guide for model setup.
 continue/revise invalidates selected dependents and preserves audit history.
 Approval cannot bypass evidence checks. Changed input bytes trigger dependent revalidation.
 Cancelled projects cannot resume. See [architecture and recovery](docs/ARCHITECTURE.md).

@@ -308,6 +308,60 @@ exhausted request can reuse its cached failed validation; changing the model cha
 request cache key. Accepted source appraisals remain checkpointed. Supplying additional
 source text changes inputs and triggers scientific revalidation.
 
+### Automatically try another free model
+
+A source appraisal quote error is a response-validation failure, not HTTP 429. After the
+configured repair limit, PaperForge now tries the next permitted route automatically. Each
+model receives the original accessible text and is checked independently. It never accepts
+invented evidence merely to continue. Provider failures and rate limits also trigger fallback;
+HTTP 429 prefers another eligible route promptly instead of consuming retries on the first.
+
+Register an alternative model once, using its existing provider key, and save the chain:
+
+~~~powershell
+git pull --ff-only origin feat/enhanced_writing
+python -m pip install -e ".[documents,scientific]"
+$Project = 'projects/topic-paper'
+# Gemini 3.8 Flash currently offers a free tier; verify your own account entitlement.
+paperforge model $Project google_flash gemini --model gemini-3.8-flash --billing free --temperature 1 --max-output-tokens 8192 --min-interval-seconds 60 --select
+# Include configured free providers whose saved credentials are present:
+paperforge route $Project --free
+# Override any existing literature-stage chain as well:
+paperforge route $Project --free --stage literature
+paperforge doctor $Project
+paperforge resume $Project --until literature
+# After literature completes:
+paperforge resume $Project
+~~~
+
+See [Google pricing](https://ai.google.dev/gemini-api/docs/pricing). Both Gemini models use
+GEMINI_API_KEY; changing model does not require another key. Free quota can differ by model
+and project. route --free does not discover or assume prices for arbitrary provider models:
+it uses registered routes explicitly marked free and excludes paid/unknown routes. It sets
+free_only even if the previous policy allowed payment. Keys are never printed. No live model
+request is made while setting the chain. An explicit ordered list is also supported:
+
+~~~powershell
+paperforge route $Project google_flash google --free
+paperforge route $Project google_flash google --free --stage literature
+~~~
+
+To include Groq, save GROQ_API_KEY in .env and register its route before rerunning route --free:
+
+~~~powershell
+. .\scripts\Enter-PaperForge.ps1 -Project $Project -ReloadEnv
+paperforge model $Project fast groq --model openai/gpt-oss-120b --billing free --min-interval-seconds 20
+paperforge route $Project --free
+paperforge route $Project --free --stage literature
+~~~
+
+Stage overrides take precedence over role/default routes; role overrides precede the default.
+Set the desired chain for other existing overrides if necessary. Local Ollama may join the
+chain but requires a running server and installed model; missing local services cannot repair
+a failed hosted request. Groq/free hosted providers have their own token limits. When every
+eligible route fails, the workflow stops with route diagnostics, rather than looping forever.
+Accepted source appraisals and completed stages survive; do not reinitialize the project.
+
 At awaiting_author, provide the required genuine evidence or change the scope:
 
 ~~~powershell

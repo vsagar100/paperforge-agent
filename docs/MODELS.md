@@ -59,6 +59,22 @@ control instead of blocking indefinitely. Set model --min-interval-seconds (0–
 to pace dispatches across roles and restarts in one PaperForge project. Other applications/projects
 sharing provider quota require their own coordination. Spacing does not increase daily/token quota.
 
+Fallback covers provider failures AND JSON/schema/evidence validation failures. Each eligible
+route gets the original task and its own bounded max_schema_repairs allowance; a rejected
+model's claims are not forwarded to the next model. HTTP 429 moves promptly to another
+eligible route when available, while preserving the exhausted route's suggested cooldown.
+Only a validated response may become an accepted checkpoint. When all routes fail, errors
+identify the attempted routes and progress remains resumable. Total attempts are bounded
+by the configured chain length, per-route provider retries and per-route repair limit.
+
+route PROJECT --free saves an ordered chain of configured models explicitly marked free
+whose keys are present (or local Ollama), and sets policy to free_only. The current preferred
+route stays first; additional hosted routes precede additional local routes. An explicit list,
+such as route PROJECT google_flash google --free, sets your preferred order. No unconfigured
+model is guessed; provider model listings do not certify billing. A local route still requires
+a running server and an installed model. No provider request occurs while configuring a chain.
+Stage/role overrides keep their usual precedence; set a chain at the relevant override too.
+
 Timeouts, disconnections and malformed successes may have been billed: their reservations
 remain counted. External inference cannot be guaranteed exactly once. There is no automatic
 release of uncertain costs without reconciliation.

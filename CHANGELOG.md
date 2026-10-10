@@ -2,6 +2,10 @@
 
 ## Unreleased — PowerShell setup and saved credentials
 
+- Fall back across configured routes after schema/evidence repairs fail, giving each model
+  the original task and validating its response before acceptance.
+- On HTTP 429, prefer another eligible configured route over retrying the exhausted one.
+- Add route --free to save a credentialed free-model chain and enforce free_only policy.
 - Diagnose HTTP 429 without exposing server bodies; honor HTTP Retry-After and Gemini
   RetryInfo, avoid brief retries of reported daily/zero quotas, and persist long cooldowns.
 - Add saved per-model request spacing and bounded inline waits with explicit fallback.

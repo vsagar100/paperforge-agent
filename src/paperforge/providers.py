@@ -21,11 +21,13 @@ class ProviderFailure(RuntimeError):
         retryable: bool = False,
         retry_after: float = 0,
         uncertain: bool = False,
+        status_code: int | None = None,
     ):
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
         self.uncertain = uncertain
+        self.status_code = status_code
 
 
 class HTTPProvider:
@@ -294,6 +296,7 @@ class HTTPProvider:
                 retryable=retryable and not permanent,
                 retry_after=delay,
                 uncertain=status >= 500 or status == 408,
+                status_code=status,
             )
         try:
             body = response.json()

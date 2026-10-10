@@ -191,8 +191,14 @@ def set_model(
 
 
 @app.command()
-def route(project: Path, names: list[str], stage: str | None = None, role: str | None = None):
-    """Set ordered default, role or stage routes and explicit fallbacks."""
+def route(
+    project: Path,
+    names: list[str] | None = typer.Argument(None),
+    stage: str | None = None,
+    role: str | None = None,
+    free: bool = False,
+):
+    """Set ordered fallbacks; --free discovers configured credentialed free routes."""
     store = existing(project)
     if stage and role:
         raise typer.BadParameter("Choose --stage or --role, not both")
@@ -200,6 +206,33 @@ def route(project: Path, names: list[str], stage: str | None = None, role: str |
         raise typer.BadParameter("Unknown model role")
     with store.lock():
         settings = load_settings(store.config_path)
+        if free:
+            candidates = names or list(
+                dict.fromkeys(
+                    [
+                        *settings.routes(stage or "", role or ""),
+                        *sorted(
+                            settings.models,
+                            key=lambda name: settings.models[name].provider == "ollama",
+                        ),
+                    ]
+                )
+            )
+            if unknown := set(candidates) - settings.models.keys():
+                raise typer.BadParameter(f"Unknown model routes: {sorted(unknown)}")
+            if names and any(settings.models[name].billing != "free" for name in names):
+                raise typer.BadParameter("--free requires every named route to be explicitly free")
+            names = [
+                name
+                for name in candidates
+                if settings.models[name].billing == "free"
+                and HTTPProvider.has_credentials(settings.models[name])
+            ]
+            settings.policy = "free_only"
+        if not names:
+            raise typer.BadParameter(
+                "Provide route names, or configure credentialed free routes and use --free"
+            )
         if stage:
             settings.stage_routes[stage] = names
         elif role:
@@ -211,7 +244,7 @@ def route(project: Path, names: list[str], stage: str | None = None, role: str |
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
         write_settings(store.config_path, validated)
-    output({"routes": names, "stage": stage, "role": role})
+    output({"routes": names, "stage": stage, "role": role, "policy": settings.policy})
 
 
 @app.command()

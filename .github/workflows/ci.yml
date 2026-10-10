@@ -62,5 +62,5 @@ jobs:
           . .\tests\powershell_smoke.ps1
       - name: CLI and diagnostics tests on Windows
         run: |
-          & .\.venv\Scripts\python.exe -m pytest tests/test_cli.py tests/test_environment.py tests/test_diagnostics.py tests/test_appraisal.py tests/test_rate_limits.py
+          & .\.venv\Scripts\python.exe -m pytest tests/test_cli.py tests/test_environment.py tests/test_diagnostics.py tests/test_appraisal.py tests/test_rate_limits.py tests/test_fallback.py
           if ($LASTEXITCODE -ne 0) { throw "tests failed" }
