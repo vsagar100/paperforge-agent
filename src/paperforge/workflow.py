@@ -1,241 +1,789 @@
 from __future__ import annotations
 
-import hashlib
-from dataclasses import dataclass, field
+import json
 
-from paperforge.config import AppConfig
-from paperforge.domain import (
-    AuthorAction,
-    IssueDisposition,
-    StageRecord,
-    StageStatus,
-    WorkflowState,
-    utc_now,
+from paperforge.analytics import analyze
+from paperforge.audit import audit_sections, issue, source_text, unresolved_placeholders
+from paperforge.config import Settings, load_settings
+from paperforge.context import ContextComposer, section_batches, size, text_parts
+from paperforge.environment import load_environment
+from paperforge.export import export_packet
+from paperforge.inputs import Ingestor, input_signature
+from paperforge.literature import Literature, LiteratureFailure
+from paperforge.llm import EvidenceValidationError, Gateway
+from paperforge.prompts import APPRAISE, DRAFT, PLAN, REVIEW
+from paperforge.schemas import (
+    InputItem,
+    Project,
+    Review,
+    Section,
+    Source,
+    SourceAssessment,
+    StudyPlan,
 )
-from paperforge.exporters import ExportReport, OutputExporter
-from paperforge.providers.base import ProviderError
-from paperforge.stages import StageOutcome, StageRunner
-from paperforge.storage import ProjectStore
+from paperforge.store import STAGES, Store, fingerprint
+
+RESEARCH_SECTIONS = [
+    "Introduction",
+    "Related Work",
+    "Research Gap",
+    "Problem Formulation",
+    "Proposed Methodology",
+    "Mathematical Model / Algorithm",
+    "Methodology Flowchart",
+    "System / Architecture Block Diagram",
+    "Experimental or Simulation Setup",
+    "Evaluation Metrics",
+    "Results",
+    "Comparative Analysis",
+    "Statistical Validation",
+    "Ablation / Sensitivity Analysis",
+    "Discussion",
+    "Limitations",
+    "Future Work",
+    "Conclusion",
+    "Declarations",
+    "Abstract",
+    "Keywords",
+]
+REVIEW_SECTIONS = [
+    "Introduction",
+    "Review Methodology",
+    "Related Work",
+    "Research Gap",
+    "Critical Synthesis",
+    "Discussion",
+    "Limitations",
+    "Future Work",
+    "Conclusion",
+    "Declarations",
+    "Abstract",
+    "Keywords",
+]
 
 
-@dataclass(slots=True)
-class WorkflowReport:
-    records: list[StageRecord] = field(default_factory=list)
-    export: ExportReport = field(default_factory=ExportReport)
-    resumed_stages: int = 0
-    invalidated: bool = False
+class Blocked(RuntimeError):
+    def __init__(self, message: str, output: dict):
+        super().__init__(message)
+        self.output = output
 
 
-class WorkflowEngine:
-    """Resumable, deterministic state machine for the PaperForge 2.1 pipeline."""
+class Workflow:
+    """An explicit state machine. Every transition is durable; no hidden LLM loop."""
 
     def __init__(
         self,
-        store: ProjectStore,
-        config: AppConfig,
-        runner: StageRunner,
-    ) -> None:
+        store: Store,
+        settings: Settings | None = None,
+        gateway: Gateway | None = None,
+        literature: Literature | None = None,
+    ):
+        load_environment(store.root)
         self.store = store
-        self.config = config
-        self.runner = runner
-        self.last_report = WorkflowReport()
+        self.settings = settings or load_settings(store.config_path)
+        self.gateway = gateway or Gateway(store, self.settings)
+        self.literature = literature or Literature(store)
+        self.project = Project.model_validate(store.get("project"))
 
-    def run(self, *, force_rebuild: bool = False) -> WorkflowReport:
-        with self.store.workflow_lock():
-            self.last_report = WorkflowReport()
-            state = self.store.load_state()
-            self._synchronize_inputs(state, force_rebuild)
+    def close(self):
+        self.gateway.close()
+        self.literature.close()
 
-            for stage in self.config.workflow.stages:
-                state = self.store.load_state()
-                if state.status_for(stage).complete and self.config.workflow.resume:
-                    self.last_report.resumed_stages += 1
+    def run(self, until: str | None = None) -> dict:
+        if until and until not in STAGES:
+            raise ValueError("Unknown stop stage")
+        with self.store.lock():
+            if self.store.get("status") in {"cancelled", "paused"}:
+                return self.store.snapshot()
+            self._sync()
+            if self.store.get("status") == "awaiting_author":
+                return self.store.snapshot()
+            for stage in STAGES:
+                record = self.store.stage(stage)
+                if record and record["status"] == "completed":
+                    if stage == "export":
+                        self.store.set(
+                            "status",
+                            "completed_with_actions"
+                            if record["output"]["author_actions"]
+                            else "ready_for_author_review",
+                        )
+                    if stage == until:
+                        break
                     continue
+                self.store.start(stage)
+                try:
+                    output = getattr(self, "_" + stage)()
+                    self.store.finish(stage, output)
+                except Blocked as exc:
+                    self.store.finish(stage, exc.output, "blocked", str(exc))
+                    self.store.set("status", "awaiting_author")
+                    self._partial_packet()
+                    break
+                except Exception as exc:
+                    self.store.finish(stage, {}, "failed", str(exc))
+                    self.store.set("status", "failed")
+                    self.store.event(
+                        "recovery",
+                        {
+                            "stage": stage,
+                            "action": "Retry with run/resume after correcting the failure",
+                        },
+                    )
+                    raise
                 if stage == "export":
-                    record = self._export_stage(state)
-                    self.last_report.records.append(record)
+                    self.store.set(
+                        "status",
+                        "completed_with_actions"
+                        if output["author_actions"]
+                        else "ready_for_author_review",
+                    )
+                elif stage == until:
+                    self.store.set("status", "pending")
                     break
-                record = self._execute_stage(stage, state)
-                self.last_report.records.append(record)
-                if record.status in {StageStatus.BLOCKED, StageStatus.FAILED}:
-                    self._write_blocked_outputs(self.store.load_state())
-                    break
-            return self.last_report
+            return self.store.snapshot()
 
-    def _execute_stage(self, stage: str, state: WorkflowState) -> StageRecord:
-        started = utc_now()
-        attempt = 1 + sum(item.stage == stage for item in state.run_history)
-        state.current_stage = stage
-        state.stage_status[stage] = StageStatus.RUNNING
-        self.store.save_state(state)
-        input_fingerprint = self._stage_fingerprint(stage, state)
-        try:
-            outcome = self.runner.execute(stage, state)
-        except (ProviderError, OSError, ValueError, KeyError) as exc:
-            failed = StageRecord(
-                stage=stage,
-                status=StageStatus.FAILED,
-                attempt=attempt,
-                input_fingerprint=input_fingerprint,
-                notes=[str(exc)],
-                started_at=started,
-                completed_at=utc_now(),
+    def _sync(self):
+        signature = input_signature(self.store)
+        scientific = fingerprint(
+            {
+                "project": self.project.model_dump(mode="json"),
+                "ingestion": self.settings.ingestion.model_dump(mode="json"),
+                "target_sources": self.settings.target_sources,
+                "minimum_sources": self.settings.minimum_sources,
+                "recent_years": self.settings.recent_years,
+                "literature_enabled": self.settings.literature_enabled,
+                "quality": [
+                    self.settings.minimum_section_words,
+                    self.settings.abstract_min_words,
+                    self.settings.abstract_max_words,
+                    self.settings.minimum_cited_sources,
+                ],
+            }
+        )
+        prior = self.store.get("input_signature")
+        if prior and (prior != signature or self.store.get("scientific_signature") != scientific):
+            self.store.invalidate(
+                "intake",
+                "Evidence or scientific configuration changed; dependent stages require revalidation",
             )
-            state = self.store.load_state()
-            self.store.record_stage(state, failed)
-            raise
-        record = self._record_from_outcome(
-            stage,
-            attempt,
-            input_fingerprint,
-            started,
-            outcome,
-        )
-        state = self.store.load_state()
-        self.store.record_stage(state, record)
-        return record
+        # Routing and budget changes affect future calls without erasing accepted work.
+        self.store.set("input_signature", signature)
+        self.store.set("scientific_signature", scientific)
+        self.store.set("resolved_settings", self.settings.model_dump(mode="json"))
 
-    def _export_stage(self, state: WorkflowState) -> StageRecord:
-        started = utc_now()
-        attempt = 1 + sum(item.stage == "export" for item in state.run_history)
-        input_fingerprint = self._stage_fingerprint("export", state)
-        self._set_readiness(state)
-        exporter = OutputExporter(self.store)
-        export_report = exporter.export(state)
-        self.last_report.export = export_report
-        outcome = StageOutcome(
-            status=StageStatus.PASSED,
-            score=1.0,
-            artifacts=[str(path.relative_to(self.store.root)) for path in export_report.files],
-            notes=list(export_report.warnings),
-        )
-        record = self._record_from_outcome(
-            "export",
-            attempt,
-            input_fingerprint,
-            started,
-            outcome,
-        )
-        state = self.store.load_state()
-        self.store.record_stage(state, record)
-        state.workflow_completed = True
-        state.current_stage = None
-        state.completed_at = utc_now()
-        self.store.save_state(state)
-        # Rewrite the report after export is recorded so stage history is complete.
-        self.last_report.export = exporter.export(state)
-        return record
+    def _output(self, stage: str) -> dict:
+        return (self.store.stage(stage) or {}).get("output") or {}
 
-    def _write_blocked_outputs(self, state: WorkflowState) -> None:
-        state.workflow_completed = False
-        state.submission_ready = False
-        state.author_actions = self._author_actions(state)
-        self.store.save_state(state)
-        if self.store.read_manuscript().strip():
-            self.last_report.export = OutputExporter(self.store).export(state)
+    def _inputs(self) -> list[InputItem]:
+        return [InputItem.model_validate(item) for item in self._output("intake").get("inputs", [])]
 
-    def _set_readiness(self, state: WorkflowState) -> None:
-        final = state.stage_records.get("final_review")
-        state.author_actions = self._author_actions(state)
-        state.submission_ready = bool(
-            final
-            and final.status == StageStatus.PASSED
-            and final.score >= self.config.quality.minimum_review_score
-            and not any(
-                issue.disposition == IssueDisposition.INTEGRITY_BLOCKER and not issue.resolved
-                for issue in final.issues
+    def _sources(self) -> list[Source]:
+        return [
+            Source.model_validate(source)
+            for source in self._output("literature").get("sources", [])
+        ]
+
+    def _sections(self) -> list[Section]:
+        reviewed = self._output("review").get("sections")
+        return [
+            Section.model_validate(section)
+            for section in (reviewed or self._output("draft").get("sections", []))
+        ]
+
+    def _intake(self) -> dict:
+        items = Ingestor(self.store, self.settings.ingestion).run()
+        output = {
+            "inputs": [item.model_dump(mode="json") for item in items],
+            "warnings": [f"{item.path}: {warning}" for item in items for warning in item.warnings],
+            "unsupported": [
+                item.path
+                for item in items
+                if item.status in {"unsupported", "failed", "conversion_required"}
+            ],
+        }
+        self.store.write(
+            "outputs/input-inventory.json", json.dumps(output, indent=2, ensure_ascii=False)
+        )
+        return output
+
+    def _literature(self) -> dict:
+        sources = (
+            self.literature.search(
+                self.project.topic, self.settings.target_sources, self.settings.recent_years
             )
+            if self.settings.literature_enabled
+            else []
         )
-        state.workflow_completed = True
-        state.completed_at = utc_now()
-        self.store.save_state(state)
+        # Explicit DOI-to-file association: don't mistake bibliography DOIs for the PDF's DOI.
+        association = self.store.root / "inputs" / "source-dois.json"
+        if association.exists():
+            mapping = json.loads(association.read_text(encoding="utf-8"))
+            if not isinstance(mapping, dict):
+                raise ValueError(
+                    "source-dois.json must map input-relative filenames to DOI strings"
+                )
+            by_path = {item.path.removeprefix("inputs/"): item for item in self._inputs()}
+            for name, doi in mapping.items():
+                item = by_path.get(name)
+                if not item or not item.chunks or not isinstance(doi, str):
+                    raise ValueError(
+                        "Every source DOI association requires an extracted attached file"
+                    )
+                source = self.literature.crossref(doi)
+                source.passages = item.chunks
+                source.access_level = "full_text"
+                source.verification += "; file association supplied by author"
+                sources = [old for old in sources if old.id != source.id] + [source]
+        output = {
+            "sources": [source.model_dump(mode="json") for source in sources],
+            "search_query": self.project.topic,
+            "search_limitations": "Ranked search is not exhaustive; metadata does not certify peer review, Scopus/SCI indexing or novelty",
+        }
+        readable = [source for source in sources if source.abstract or source.passages]
+        if len(readable) < self.settings.minimum_sources:
+            raise Blocked(
+                "Too few accessible sources to support a literature-grounded manuscript",
+                {
+                    **output,
+                    "required_action": "Attach accessible papers with source-dois.json, or choose a defensible source threshold; metadata alone is insufficient",
+                },
+            )
+        assessments = []
+        for source in readable:
+            material = source_text(source)
+            key = "appraisal:" + fingerprint([source.id, material, 1])
+            cached = self.store.cached_checkpoint(key)
+            assessment = (
+                SourceAssessment.model_validate(cached)
+                if cached
+                else self._appraise(source, material)
+            )
+            # Revalidate saved checkpoints too; only accepted appraisals may be reused.
+            self._validate_appraisal(assessment, source, material)
+            self.store.checkpoint(key, assessment.model_dump(mode="json"))
+            assessments.append(assessment.model_dump(mode="json"))
+        output["assessments"] = assessments
+        return output
 
-    @staticmethod
-    def _author_actions(state: WorkflowState) -> list[AuthorAction]:
-        final = state.stage_records.get("final_review")
-        if final is None:
-            latest_issues = [
-                issue
-                for record in state.stage_records.values()
-                for issue in record.issues
-                if not issue.resolved
-            ]
+    def _appraise(self, source: Source, material: str) -> SourceAssessment:
+        base = {
+            "source_id": source.id,
+            "source_title": source.title,
+            "access_level": source.access_level,
+        }
+        full = {**base, "accessible_text": material}
+        if size(full) <= self.settings.max_context_chars:
+            parts = [(0, material)]
         else:
-            latest_issues = [issue for issue in final.issues if not issue.resolved]
-        actions: list[AuthorAction] = []
-        seen: set[tuple[str, str | None]] = set()
-        for issue in latest_issues:
-            key = (issue.code, issue.section)
-            if key in seen:
-                continue
-            seen.add(key)
-            actions.append(
-                AuthorAction(
-                    id=f"ACT-{len(actions) + 1:03d}",
-                    section=issue.section,
-                    action=issue.required_change,
-                    reason=issue.description,
-                    blocking=issue.disposition == IssueDisposition.INTEGRITY_BLOCKER,
+            overhead = size(
+                {
+                    **base,
+                    "accessible_text": "",
+                    "appraisal_batch": {"index": 0, "count": 0, "start": 0},
+                }
+            )
+            budget = min(30000, self.settings.max_context_chars - overhead - 128)
+            parts = text_parts(material, budget)
+        assessments = []
+        for index, (start, text) in enumerate(parts):
+            context = {**base, "accessible_text": text}
+            if len(parts) > 1:
+                context["appraisal_batch"] = {"index": index, "count": len(parts), "start": start}
+            key = "appraisal-batch:" + fingerprint(context)
+            cached = self.store.cached_checkpoint(key)
+            assessment = (
+                SourceAssessment.model_validate(cached)
+                if cached
+                else self.gateway.structured(
+                    SourceAssessment,
+                    stage="literature",
+                    role="extractor",
+                    system=APPRAISE,
+                    context=context,
+                    validate=lambda value, text=text: self._validate_appraisal(value, source, text),
                 )
             )
-        return actions
-
-    def _synchronize_inputs(self, state: WorkflowState, force_rebuild: bool) -> None:
-        input_fingerprint = self.store.input_fingerprint(state)
-        config_fingerprint = self.store.config_fingerprint()
-        changed = bool(
-            state.input_fingerprint
-            and (
-                state.input_fingerprint != input_fingerprint
-                or state.config_fingerprint != config_fingerprint
+            self._validate_appraisal(assessment, source, text)
+            self.store.checkpoint(key, assessment.model_dump(mode="json"))
+            assessments.append(assessment)
+        merged = assessments[0].model_copy(deep=True)
+        fields = ("method", "dataset_or_system", "finding", "reported_limitation")
+        for field in fields:
+            setattr(
+                merged,
+                field,
+                next((getattr(a, field) for a in assessments if getattr(a, field)), None),
             )
-        )
-        if force_rebuild or (
-            changed and self.config.workflow.invalidate_on_input_change and state.stage_records
-        ):
-            reason = (
-                "Generated stages invalidated by explicit rebuild."
-                if force_rebuild
-                else "Generated stages invalidated because project inputs or configuration changed."
+        if len(parts) > 1:
+            # Missing within one batch is never presented as missing from the entire paper.
+            merged.missing_from_accessible_text = [
+                field for field in fields if getattr(merged, field) is None
+            ]
+            self.store.write(
+                "audit/appraisal/" + fingerprint([source.id, material]) + ".json",
+                json.dumps(
+                    {
+                        "source_id": source.id,
+                        "scope": "All accessible text appraised in contiguous batches; canonical matrix retains first supported fact per field",
+                        "batches": [
+                            {
+                                "start": start,
+                                "end": start + len(text),
+                                "assessment": a.model_dump(mode="json"),
+                            }
+                            for (start, text), a in zip(parts, assessments, strict=True)
+                        ],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
             )
-            self.store.reset_generated_state(state, reason)
-            self.last_report.invalidated = True
-            state = self.store.load_state()
-        state.input_fingerprint = input_fingerprint
-        state.config_fingerprint = config_fingerprint
-        self.store.save_state(state)
+        return merged
 
-    def _stage_fingerprint(self, stage: str, state: WorkflowState) -> str:
-        digest = hashlib.sha256()
-        digest.update(stage.encode("utf-8"))
-        digest.update((state.input_fingerprint or "").encode("ascii"))
-        digest.update((state.config_fingerprint or "").encode("ascii"))
-        digest.update(self.store.read_manuscript().encode("utf-8"))
-        return digest.hexdigest()
+    @staticmethod
+    def _validate_appraisal(assessment: SourceAssessment, source: Source, material: str) -> None:
+        errors = []
+        if assessment.source_id != source.id:
+            errors.append("source_id differs from the supplied source_id")
+        for field in ("method", "dataset_or_system", "finding", "reported_limitation"):
+            fact = getattr(assessment, field)
+            if fact and (not fact.quote.strip() or fact.quote not in material):
+                errors.append(f"{field}.quote does not occur exactly in accessible_text")
+        if errors:
+            raise EvidenceValidationError(
+                f"Source appraisal {source.id}: {'; '.join(errors)}. "
+                "Use the supplied source_id and verbatim supporting quotes; "
+                "return null for unsupported facts. If repairs fail, select another extractor "
+                "model or supply accessible source text, then resume."
+            )
 
-    def _record_from_outcome(
-        self,
-        stage: str,
-        attempt: int,
-        input_fingerprint: str,
-        started,
-        outcome: StageOutcome,
-    ) -> StageRecord:
-        output_material = (
-            self.store.read_manuscript() + "\n".join(outcome.artifacts) + "\n".join(outcome.changes)
+    def _legacy_context(self) -> dict:
+        # Explicit excerpt selection; do not claim complete reading of omitted document chunks.
+        inputs = [
+            {
+                "id": item.id,
+                "role": item.role,
+                "status": item.status,
+                "path": item.path,
+                "excerpts": item.chunks[:20],
+                "omitted_chunks": max(0, len(item.chunks) - 20),
+                "warnings": item.warnings,
+            }
+            for item in self._inputs()
+            if item.chunks
+        ]
+        return {
+            "project": self.project.model_dump(mode="json"),
+            "sources": [source.model_dump(mode="json") for source in self._sources()],
+            "source_assessments": self._output("literature").get("assessments", []),
+            "inputs": inputs,
+            "results": self._output("analysis").get("results", []),
+        }
+
+    def _context(self, task: dict | None = None) -> dict:
+        return ContextComposer(self.store, self.settings.max_context_chars).compose(
+            project=self.project.model_dump(mode="json"),
+            sources=self._sources(),
+            assessments=self._output("literature").get("assessments", []),
+            inputs=self._inputs(),
+            results=self._output("analysis").get("results", []),
+            task=task,
         )
-        return StageRecord(
-            stage=stage,
-            status=outcome.status,
-            attempt=attempt,
-            score=outcome.score,
-            input_fingerprint=input_fingerprint,
-            output_fingerprint=hashlib.sha256(output_material.encode("utf-8")).hexdigest(),
-            model=outcome.model,
-            issues=outcome.issues,
-            changes=outcome.changes,
-            artifacts=outcome.artifacts,
-            notes=outcome.notes,
-            started_at=started,
-            completed_at=utc_now(),
+
+    def _validate_section(self, section: Section, title: str) -> None:
+        if section.title != title:
+            raise EvidenceValidationError(f"Return the requested section title {title!r}")
+        findings = audit_sections(
+            [section], self._sources(), self._inputs(), self._output("analysis").get("results", [])
         )
+        if findings:
+            raise EvidenceValidationError(
+                "Section failed evidence gates: " + "; ".join(f.description for f in findings)
+            )
+
+    def _plan(self) -> dict:
+        def validate(plan):
+            if set(plan.gap_source_ids) - {source.id for source in self._sources()}:
+                raise EvidenceValidationError("Research gap cites unknown sources")
+
+        plan = self.gateway.structured(
+            StudyPlan,
+            stage="plan",
+            role="planner",
+            system=PLAN,
+            context=self._context(),
+            validate=validate,
+        )
+        validate(plan)
+        candidates, warnings = [], []
+        if plan.missing_evidence and plan.dataset_search_terms and self.settings.literature_enabled:
+            try:
+                candidates = self.literature.dataset_candidates(plan.dataset_search_terms)
+            except LiteratureFailure as exc:
+                warnings.append(str(exc))
+        return {
+            "plan": plan.model_dump(mode="json"),
+            "dataset_candidates": candidates,
+            "warnings": warnings,
+            "novelty_status": "provisional within searched accessible literature",
+        }
+
+    def _analysis(self) -> dict:
+        results = analyze(self._inputs())
+        sources = self._sources()
+        results.append(
+            {
+                "id": "SEARCH-" + fingerprint([self.project.topic, [s.id for s in sources]])[:12],
+                "input_id": "verified-source-register",
+                "calculator": "literature_inventory_v1",
+                "metrics": {
+                    "retrieved_source_count": len(sources),
+                    "accessible_source_count": sum(bool(s.abstract or s.passages) for s in sources),
+                },
+                "query": self.project.topic,
+                "assumptions": [
+                    "Ranked search is not exhaustive and does not establish indexing or global novelty"
+                ],
+            }
+        )
+        return {
+            "results": results,
+            "unperformed_experiments": self._output("plan").get("plan", {}).get("experiments", []),
+            "execution_policy": "Only built-in deterministic calculators ran. Uploaded/model-generated code, physical experiments and native simulations were not executed",
+        }
+
+    def _draft(self) -> dict:
+        has_data = any(item.role == "dataset" and item.chunks for item in self._inputs()) or any(
+            result.get("calculator") == "confusion_matrix_v1"
+            for result in self._output("analysis").get("results", [])
+        )
+        resolved = self.project.paper_type
+        if resolved == "auto":
+            resolved = "original_research" if has_data else "review"
+        titles = RESEARCH_SECTIONS if resolved == "original_research" else REVIEW_SECTIONS
+        sections = []
+        for title in titles:
+            task = {
+                "plan": self._output("plan")["plan"],
+                "paper_type": resolved,
+                "requested_section": title,
+                "generation": self.store.get("epoch:draft", 0),
+                "section_word_target": [
+                    self.settings.abstract_min_words,
+                    self.settings.abstract_max_words,
+                ]
+                if title == "Abstract"
+                else self.settings.minimum_section_words,
+            }
+            # Accepted writing belongs to canonical evidence, not to one packet layout.
+            key = "section:" + fingerprint([title, {**self._legacy_context(), **task}, 1])
+            cached = self.store.cached_checkpoint(key)
+            if cached:
+                section = Section.model_validate(cached)
+                self._validate_section(section, title)
+            else:
+                context = self._context(task)
+                section = self.gateway.structured(
+                    Section,
+                    stage="draft",
+                    role="writer",
+                    system=DRAFT,
+                    context=context,
+                    validate=lambda value, title=title: self._validate_section(value, title),
+                )
+                if section.title != title:
+                    raise ValueError(f"Expected section {title!r}, received {section.title!r}")
+                issues = audit_sections(
+                    [section],
+                    self._sources(),
+                    self._inputs(),
+                    self._output("analysis").get("results", []),
+                )
+                for _ in range(self.settings.max_schema_repairs):
+                    if not issues:
+                        break
+                    context = self._context(
+                        {
+                            **task,
+                            "corrections": [finding.model_dump(mode="json") for finding in issues],
+                            "previous_section": section.model_dump(mode="json"),
+                        }
+                    )
+                    section = self.gateway.structured(
+                        Section,
+                        stage="draft",
+                        role="reviser",
+                        system=DRAFT,
+                        context=context,
+                        validate=lambda value, title=title: self._validate_section(value, title),
+                    )
+                    issues = audit_sections(
+                        [section],
+                        self._sources(),
+                        self._inputs(),
+                        self._output("analysis").get("results", []),
+                    )
+                if issues or section.title != title:
+                    raise Blocked(
+                        "Section failed evidence gates",
+                        {
+                            "issues": [finding.model_dump(mode="json") for finding in issues],
+                            "section": section.model_dump(mode="json"),
+                            "completed_sections": [s.model_dump(mode="json") for s in sections],
+                        },
+                    )
+                self.store.checkpoint(key, section.model_dump(mode="json"))
+            sections.append(section)
+        return {
+            "paper_type": resolved,
+            "sections": [section.model_dump(mode="json") for section in sections],
+        }
+
+    def _review_batches(self, sections: list[Section], round_id: int) -> Review:
+        batches = section_batches(
+            sections,
+            self.settings.max_context_chars // 3,
+            max_paragraph_budget=self.settings.max_context_chars * 2 // 3,
+        )
+        outline = [
+            {
+                "title": s.title,
+                "paragraphs": len(s.paragraphs),
+                "words": sum(len(p.text.split()) for p in s.paragraphs),
+                "source_ids": sorted(
+                    {identifier for p in s.paragraphs for identifier in p.source_ids}
+                ),
+            }
+            for s in sections
+        ]
+        known_titles = {s.title for s in sections}
+
+        def validate(review):
+            if any(finding.section not in known_titles for finding in review.issues):
+                raise EvidenceValidationError("Reviewer must identify an existing section")
+
+        reviews = []
+        for index, batch in enumerate(batches):
+            context = self._context(
+                {
+                    "plan": self._output("plan")["plan"],
+                    "sections": batch,
+                    "manuscript_outline": outline,
+                    "review_batch": {
+                        "index": index,
+                        "count": len(batches),
+                        "scope": "Review the supplied paragraphs; use outline for manuscript structure. Other batches cover remaining paragraphs.",
+                    },
+                    "generation": self.store.get("epoch:review", 0),
+                    "review_round": round_id,
+                }
+            )
+            key = "review-batch:" + fingerprint(context)
+            cached = self.store.cached_checkpoint(key)
+            review = (
+                Review.model_validate(cached)
+                if cached
+                else self.gateway.structured(
+                    Review,
+                    stage="review",
+                    role="reviewer",
+                    system=REVIEW,
+                    context=context,
+                    validate=validate,
+                )
+            )
+            validate(review)
+            # Do not cache author blockers: a continue decision must allow a fresh assessment.
+            if not any(finding.blocking and finding.needs_author for finding in review.issues):
+                self.store.checkpoint(key, review.model_dump(mode="json"))
+            reviews.append(review)
+        issues, seen = [], set()
+        for review in reviews:
+            for finding in review.issues:
+                key = fingerprint(finding.model_dump(mode="json"))
+                if key not in seen:
+                    seen.add(key)
+                    issues.append(finding)
+        return Review(issues=issues, summary="\n".join(r.summary for r in reviews))
+
+    def _review(self) -> dict:
+        context_key = "review:" + fingerprint(
+            [
+                self._output("draft"),
+                self._legacy_context(),
+                self._output("plan"),
+                self.store.get("epoch:review", 0),
+            ]
+        )
+        checkpoint = self.store.cached_checkpoint(context_key)
+        sections = [
+            Section.model_validate(section)
+            for section in (checkpoint or self._output("draft"))["sections"]
+        ]
+        completed_rounds = (checkpoint or {}).get("round", 0)
+        for round_id in range(completed_rounds, self.settings.max_review_rounds + 1):
+            review = self._review_batches(sections, round_id)
+            review.issues += audit_sections(
+                sections,
+                self._sources(),
+                self._inputs(),
+                self._output("analysis").get("results", []),
+            )
+            output = {
+                "sections": [section.model_dump(mode="json") for section in sections],
+                "review": review.model_dump(mode="json"),
+                "round": round_id,
+            }
+            for section in sections:
+                text = " ".join(p.text for p in section.paragraphs)
+                words = len(text.split())
+                if (
+                    section.title == "Abstract"
+                    and not self.settings.abstract_min_words
+                    <= words
+                    <= self.settings.abstract_max_words
+                ):
+                    review.issues.append(
+                        issue(
+                            section.title,
+                            "Abstract word count outside configured limits",
+                            "writing",
+                        )
+                    )
+                elif section.title == "Keywords":
+                    terms = [term for term in text.replace(";", ",").split(",") if term.strip()]
+                    if not 5 <= len(terms) <= 8:
+                        review.issues.append(
+                            issue(
+                                section.title,
+                                "Provide 5–8 comma-separated technical keywords",
+                                "format",
+                            )
+                        )
+                elif (
+                    section.title != "Declarations" and words < self.settings.minimum_section_words
+                ):
+                    review.issues.append(
+                        issue(
+                            section.title,
+                            "Section lacks configured minimum depth; develop the supported argument",
+                            "writing",
+                        )
+                    )
+            cited = {
+                identifier
+                for section in sections
+                for p in section.paragraphs
+                for identifier in p.source_ids
+            }
+            if len(cited) < self.settings.minimum_cited_sources:
+                review.issues.append(
+                    issue(
+                        "Related Work",
+                        "Too few distinct supporting sources; add relevant evidence rather than citation padding",
+                        "citation",
+                    )
+                )
+            output["review"] = review.model_dump(mode="json")
+            if not any(finding.blocking for finding in review.issues):
+                return output
+            if round_id >= self.settings.max_review_rounds or any(
+                finding.blocking and finding.needs_author for finding in review.issues
+            ):
+                raise Blocked(
+                    "Review requires author evidence or exceeded automatic revision limit", output
+                )
+            for index, section in enumerate(sections):
+                issues = [
+                    finding.model_dump(mode="json")
+                    for finding in review.issues
+                    if finding.section == section.title
+                ]
+                if not issues:
+                    continue
+                revised = self.gateway.structured(
+                    Section,
+                    stage="review",
+                    role="reviser",
+                    system=DRAFT,
+                    context=self._context(
+                        {
+                            "requested_section": section.title,
+                            "plan": self._output("plan")["plan"],
+                            "previous_section": section.model_dump(mode="json"),
+                            "corrections": issues,
+                        }
+                    ),
+                    validate=lambda value, title=section.title: self._validate_section(
+                        value, title
+                    ),
+                )
+                if revised.title != section.title:
+                    raise ValueError("Revision changed requested section title")
+                guard = audit_sections(
+                    [revised],
+                    self._sources(),
+                    self._inputs(),
+                    self._output("analysis").get("results", []),
+                )
+                if guard:
+                    raise Blocked(
+                        "Revision introduced unsupported content; previous sections retained",
+                        {
+                            **output,
+                            "rejected_revision": revised.model_dump(mode="json"),
+                            "issues": [i.model_dump(mode="json") for i in guard],
+                        },
+                    )
+                sections[index] = revised
+                # Each accepted section survives a crash midway through the revision round.
+                self.store.checkpoint(
+                    context_key,
+                    {"sections": [s.model_dump(mode="json") for s in sections], "round": round_id},
+                )
+            self.store.checkpoint(
+                context_key,
+                {"sections": [s.model_dump(mode="json") for s in sections], "round": round_id + 1},
+            )
+        raise RuntimeError("Review loop ended unexpectedly")
+
+    def _export(self) -> dict:
+        sections = self._sections()
+        actions = unresolved_placeholders(sections)
+        if self._output("draft").get("paper_type") == "original_research":
+            actions.extend(self._output("plan").get("plan", {}).get("missing_evidence", []))
+        actions.extend(self._output("intake").get("warnings", []))
+        if self._output("plan").get("plan", {}).get("figures"):
+            actions.append(
+                "Proposed diagrams require author verification and figure callouts in the manuscript"
+            )
+        return export_packet(
+            self.store,
+            sections,
+            self._sources(),
+            self._output("analysis").get("results", []),
+            actions,
+            review=self._output("review").get("review"),
+            recent_years=self.settings.recent_years,
+            plan=self._output("plan").get("plan"),
+            assessments=self._output("literature").get("assessments", []),
+        )
+
+    def _partial_packet(self):
+        sections = self._sections()
+        if not sections:
+            sections = [
+                Section.model_validate(s)
+                for s in self._output("draft").get("completed_sections", [])
+            ]
+        if sections:
+            export_packet(
+                self.store,
+                sections,
+                self._sources(),
+                self._output("analysis").get("results", []),
+                ["Workflow blocked; this is an incomplete draft", self.store.get("status")],
+                review=self._output("review").get("review"),
+                recent_years=self.settings.recent_years,
+            )
