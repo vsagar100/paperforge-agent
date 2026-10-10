@@ -152,6 +152,64 @@ model ID, and probe again. If the ID came from models/... output, PaperForge nor
 the prefix. If 401/403 occurs, check replacement key/API permissions. For 429, check provider
 quota/rate limits before resuming; --billing free does not bypass them.
 
+### HTTP 429: quota versus burst limits
+
+HTTP 429 alone cannot identify the exhausted limit. In [Google AI Studio](https://aistudio.google.com/),
+select the Google project owning the saved key and inspect its active model rate limits and usage.
+Gemini checks requests per minute, input tokens per minute and requests per day. Limits are
+shared by keys in that Google project; another key in the same project does not increase them.
+See Google's [rate-limit guide](https://ai.google.dev/gemini-api/docs/rate-limits).
+
+| Observed limit | Recovery |
+|---|---|
+| Per-minute requests/tokens | Wait for the window to reset; pace subsequent calls and check input size. |
+| Daily quota exhausted | Wait for the daily reset, or select another permitted provider. |
+| Zero allocation | Verify model/project entitlement; waiting cannot create an allocation. |
+
+PaperForge now honors Retry-After (seconds or HTTP date) and structured Gemini RetryInfo.
+Only classified guidance and numeric delays are displayed; server messages, keys and project
+identifiers are not echoed. Reported daily or zero quota errors stop without rapid retries.
+Other transient errors use bounded exponential backoff with jitter. A provider delay longer
+than max_inline_wait_seconds (default/maximum 60) is persisted and returned to the author,
+so resuming too soon does not dispatch another request on that endpoint/model.
+
+For a minute-level burst limit, save request spacing in the existing route. The value 20
+below is an example starting point, not a claim about your quota: choose an interval with
+margin above 60 / your permitted RPM, and also account for the input-token limit. Intervals
+range from 0 (no added spacing, default) to 60 seconds. Very low limits may need an external
+scheduler or a provider with sufficient capacity.
+
+~~~powershell
+git pull --ff-only origin feat/enhanced_writing
+python -m pip install -e ".[documents,scientific]"
+paperforge model projects/thermal google gemini --model gemini-3.5-flash-lite --billing free --min-interval-seconds 20 --select
+paperforge doctor projects/thermal
+# Resume once the applicable provider window has reset:
+paperforge resume projects/thermal --until literature
+paperforge resume projects/thermal
+~~~
+
+Spacing/cooldowns cover requests in this PaperForge project, including role/stage changes
+and process restarts. Other projects or applications using the same provider quota are
+outside this limiter. Accepted calls/checkpoints are reused without a new request.
+
+To use another provider, save its own key in .env and reload, then select a permitted route:
+
+~~~powershell
+notepad .\.env
+# Add GROQ_API_KEY="YOUR_GROQ_KEY" using your own console.groq.com account.
+. .\scripts\Enter-PaperForge.ps1 -Project projects/thermal -ReloadEnv
+paperforge model projects/thermal fast groq --model openai/gpt-oss-120b --billing free --min-interval-seconds 20 --select
+paperforge probe projects/thermal fast
+paperforge resume projects/thermal --until literature
+~~~
+
+Use the free label only for an account entitled to free use. Groq has separate request/token
+limits; large manuscript contexts may exceed them even if a tiny probe succeeds. Check
+existing stage/role overrides with doctor; --select changes the default route only. Do not
+add paid fallback routes without configuring current INR price ceilings and the budget policy.
+Completed work is preserved when changing provider. Do not initialize the project again.
+
 After a successful probe, recover your existing failed run:
 
 ~~~powershell

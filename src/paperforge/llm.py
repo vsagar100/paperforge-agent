@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 from collections.abc import Callable
 from typing import TypeVar
@@ -32,13 +33,37 @@ class Gateway:
         settings: Settings,
         backend: HTTPProvider | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.time,
     ):
         self.store, self.settings = store, settings
         self.backend = backend or HTTPProvider()
         self.sleep = sleep
+        self.clock = clock
 
     def close(self):
         self.backend.close()
+
+    @staticmethod
+    def _limit_key(model: Model) -> str:
+        # Aliases for the same endpoint/model share pacing; credentials are never persisted.
+        return "request_timing:" + fingerprint([model.provider, model.base_url, model.requested_id])
+
+    def _wait_for_route(self, model: Model) -> None:
+        timing = self.store.get(self._limit_key(model), {})
+        earliest = max(
+            timing.get("retry_at", 0),
+            timing["last_dispatch"] + model.min_interval_seconds
+            if "last_dispatch" in timing
+            else 0,
+        )
+        delay = max(0, earliest - self.clock())
+        if delay > self.settings.max_inline_wait_seconds:
+            raise GatewayFailure(
+                f"Provider cooldown: retry in at least {delay:.1f} seconds, then resume; "
+                "no new request was sent on this route."
+            )
+        if delay:
+            self.sleep(delay)
 
     def _eligible(self, model: Model) -> bool:
         if model.billing == "unknown":
@@ -87,10 +112,16 @@ class Gateway:
             estimate = self.ceiling(model, system, prompt)
             for attempt in range(self.settings.max_retries + 1):
                 try:
+                    self._wait_for_route(model)
+                except GatewayFailure as exc:
+                    failures.append(f"{name}: {exc}")
+                    break
+                try:
                     call_id = self.store.reserve(key, name, estimate, self.settings.budget_inr)
                 except ValueError as exc:
                     failures.append(str(exc))
                     break
+                self.store.set(self._limit_key(model), {"last_dispatch": self.clock()})
                 try:
                     reply = self.backend.generate(model, system, prompt)
                 except ProviderFailure as exc:
@@ -101,9 +132,19 @@ class Gateway:
                         detail=str(exc),
                     )
                     failures.append(f"{name}: {exc}")
+                    if exc.retryable:
+                        delay = max(exc.retry_after, min(2**attempt, 8) + random.uniform(0, 0.5))
+                        timing = self.store.get(self._limit_key(model), {})
+                        timing["retry_at"] = self.clock() + delay
+                        self.store.set(self._limit_key(model), timing)
+                        if delay > self.settings.max_inline_wait_seconds:
+                            failures.append(
+                                f"{name}: cooldown saved for {delay:g} seconds; resume after it expires "
+                                "or use another permitted route"
+                            )
+                            break
                     if not exc.retryable or attempt == self.settings.max_retries:
                         break
-                    self.sleep(max(exc.retry_after, min(2**attempt, 8)))
                     continue
                 except Exception:
                     # A crashed adapter may already have issued a billable request.
@@ -127,7 +168,9 @@ class Gateway:
                         "Provider usage exceeded the reserved ceiling; actual cost recorded, further calls stopped"
                     )
                 return reply
-        raise GatewayFailure("No permitted model route succeeded. " + "; ".join(failures))
+        raise GatewayFailure(
+            "No permitted model route succeeded. " + "; ".join(dict.fromkeys(failures))
+        )
 
     def structured(
         self,

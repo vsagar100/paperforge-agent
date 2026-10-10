@@ -2,6 +2,9 @@
 
 ## Unreleased — PowerShell setup and saved credentials
 
+- Diagnose HTTP 429 without exposing server bodies; honor HTTP Retry-After and Gemini
+  RetryInfo, avoid brief retries of reported daily/zero quotas, and persist long cooldowns.
+- Add saved per-model request spacing and bounded inline waits with explicit fallback.
 - Repair source appraisal quote/identity errors within the configured schema-repair limit;
   keep exact-quote checks, accepted checkpoints and actionable source/field diagnostics.
 - Load repository/project .env with explicit precedence and UTF-8 BOM support.

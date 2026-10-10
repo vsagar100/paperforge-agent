@@ -51,6 +51,14 @@ includes settled costs and all unresolved reservations. Actual reported tokens s
 calls; cached successes incur no new dispatch. Every retry has its own reservation. Transient
 errors retry within bounds; auth failures do not retry.
 
+HTTP 429 guidance distinguishes only limits explicitly reported by structured provider fields;
+an unspecified 429 remains ambiguous. HTTP Retry-After (seconds or date) and Gemini RetryInfo
+are honored without shortening the delay. Reported Gemini daily/zero quotas do not rapidly retry.
+Long cooldowns survive resume; waits above max_inline_wait_seconds (default/maximum 60) return
+control instead of blocking indefinitely. Set model --min-interval-seconds (0–60, default 0)
+to pace dispatches across roles and restarts in one PaperForge project. Other applications/projects
+sharing provider quota require their own coordination. Spacing does not increase daily/token quota.
+
 Timeouts, disconnections and malformed successes may have been billed: their reservations
 remain counted. External inference cannot be guaranteed exactly once. There is no automatic
 release of uncertain costs without reconciliation.

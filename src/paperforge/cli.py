@@ -149,6 +149,7 @@ def set_model(
     output_rate: float | None = None,
     temperature: float = 0.1,
     max_output_tokens: int = 4096,
+    min_interval_seconds: float = 0,
     select: bool = False,
 ):
     """Add a named model route; paid rate ceilings are INR per million tokens."""
@@ -165,6 +166,7 @@ def set_model(
             output_inr_per_million=output_rate,
             temperature=temperature,
             max_output_tokens=max_output_tokens,
+            min_interval_seconds=min_interval_seconds,
         )
         with store.lock():
             settings = load_settings(store.config_path)
@@ -181,6 +183,7 @@ def set_model(
             "route": name,
             "requested_model": new_model.requested_id,
             "billing": new_model.billing,
+            "min_interval_seconds": new_model.min_interval_seconds,
             "selected_as_default": select,
             "completed_work_preserved": True,
         }
@@ -337,6 +340,7 @@ def doctor(project: Path):
                         "provider": model.provider,
                         "model": model.requested_id,
                         "billing": model.billing,
+                        "min_interval_seconds": model.min_interval_seconds,
                         "eligible": workflow.gateway._eligible(model),
                     }
                     for name, model in settings.models.items()

@@ -51,6 +51,7 @@ class Model(StrictModel):
     temperature: float | None = Field(default=0.1, ge=0, le=2)
     max_output_tokens: int = Field(default=4096, ge=128, le=32768)
     timeout_seconds: float = Field(default=120, gt=0, le=600)
+    min_interval_seconds: float = Field(default=0, ge=0, le=60, allow_inf_nan=False)
     token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
 
     @model_validator(mode="after")
@@ -107,6 +108,7 @@ class Settings(StrictModel):
     stage_routes: dict[str, list[str]] = Field(default_factory=dict)
     role_routes: dict[str, list[str]] = Field(default_factory=dict)
     max_retries: int = Field(default=2, ge=0, le=5)
+    max_inline_wait_seconds: float = Field(default=60, ge=0, le=60, allow_inf_nan=False)
     max_schema_repairs: int = Field(default=1, ge=0, le=3)
     max_review_rounds: int = Field(default=2, ge=0, le=4)
     minimum_section_words: int = Field(default=100, ge=1, le=1000)

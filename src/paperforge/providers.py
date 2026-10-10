@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import math
 import os
+import re
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -50,7 +54,73 @@ class HTTPProvider:
                 "Use 'paperforge models PROJECT ROUTE', update 'paperforge model --model', "
                 "then 'paperforge probe PROJECT ROUTE' and resume."
             )
+        if status == 429:
+            message += ". Provider rate limit or quota exceeded; saved billing labels do not change provider entitlement."
+            if model.provider == "gemini":
+                message += (
+                    " Check this Google project's model RPM, input TPM and daily quota in "
+                    "AI Studio. Keys in the same project share limits. Wait for the relevant "
+                    "reset or select another permitted provider, then resume."
+                )
         return message
+
+    @staticmethod
+    def retry_details(response: httpx.Response, model: Model) -> tuple[float, bool, str]:
+        """Read only structured delay/quota fields; never echo the server error body."""
+        delay = 0.0
+        header = response.headers.get("Retry-After", "")
+        try:
+            number = float(header)
+            if math.isfinite(number):
+                delay = max(0, number)
+        except ValueError:
+            try:
+                date = parsedate_to_datetime(header)
+                if date.tzinfo is None:
+                    date = date.replace(tzinfo=UTC)
+                delay = max(0, (date - datetime.now(UTC)).total_seconds())
+            except (ValueError, TypeError, OverflowError):
+                pass
+        permanent, hint = False, ""
+        if response.status_code == 429 and model.provider == "gemini":
+            try:
+                body = response.json()
+                details = body.get("error", {}).get("details", [])
+                if not isinstance(details, list):
+                    details = []
+                daily, zero = False, False
+                for item in details:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("@type") == "type.googleapis.com/google.rpc.RetryInfo":
+                        duration = item.get("retryDelay")
+                        if isinstance(duration, str) and re.fullmatch(
+                            r"\d+(?:\.\d{1,9})?s", duration
+                        ):
+                            value = float(duration[:-1])
+                            if math.isfinite(value):
+                                delay = max(delay, value)
+                    if item.get("@type") == "type.googleapis.com/google.rpc.QuotaFailure":
+                        violations = item.get("violations", [])
+                        if not isinstance(violations, list):
+                            continue
+                        for violation in violations:
+                            if not isinstance(violation, dict):
+                                continue
+                            quota = str(violation.get("quotaId", "")).lower()
+                            metric = str(violation.get("quotaMetric", "")).lower()
+                            daily |= "perday" in quota or "per_day" in metric
+                            zero |= str(violation.get("quotaValue", "")) == "0"
+                permanent = daily or zero
+                if zero:
+                    hint = " Provider reports zero quota allocation; check model access and billing in AI Studio."
+                elif daily:
+                    hint = " Provider reports a daily quota limit; brief retries cannot resolve it."
+            except (ValueError, AttributeError, TypeError):
+                pass
+        if delay:
+            hint += f" Provider suggests retrying no sooner than {delay:g} seconds."
+        return delay, permanent, hint
 
     def list_models(self, model: Model) -> list[dict]:
         """Read metadata, never generate or silently change the chosen model."""
@@ -218,13 +288,10 @@ class HTTPProvider:
         if not response.is_success:
             status = response.status_code
             retryable = status in {408, 429, 500, 502, 503, 504}
-            try:
-                delay = max(0, min(float(response.headers.get("Retry-After", "0")), 30))
-            except ValueError:
-                delay = 0
+            delay, permanent, hint = self.retry_details(response, model)
             raise ProviderFailure(
-                self.error_message(model, status),
-                retryable=retryable,
+                self.error_message(model, status) + hint,
+                retryable=retryable and not permanent,
                 retry_after=delay,
                 uncertain=status >= 500 or status == 408,
             )
